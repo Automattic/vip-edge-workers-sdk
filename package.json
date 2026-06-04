@@ -1,0 +1,19 @@
+{
+  "name": "@automattic/vip-edge-workers-sdk",
+  "version": "0.1.0",
+  "description": "AssemblyScript SDK for VIP edge-workers",
+  "ascMain": "assembly/index.ts",
+  "types": "index.ts",
+  "files": [
+    "assembly",
+    "index.ts",
+    "README.md"
+  ],
+  "dependencies": {},
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "typedoc": "^0.26.11"
+  }
+}

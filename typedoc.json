@@ -1,0 +1,15 @@
+{
+  "entryPoints": ["index.ts"],
+  "out": "docs",
+  "name": "@automattic/vip-edge-workers-sdk",
+  "includeVersion": true,
+  "skipErrorChecking": true,
+  "tsconfig": "tsconfig.typedoc.json",
+  "excludeInternal": true,
+  "excludePrivate": true,
+  "readme": "none",
+  "validation": {
+    "notExported": false,
+    "invalidLink": false
+  }
+}

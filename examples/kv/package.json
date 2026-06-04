@@ -1,0 +1,14 @@
+{
+  "name": "kv-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "asbuild": "node build.mjs"
+  },
+  "dependencies": {
+    "@automattic/vip-edge-workers-sdk": "file:../.."
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.0"
+  }
+}

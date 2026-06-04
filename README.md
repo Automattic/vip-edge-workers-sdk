@@ -1,0 +1,544 @@
+# @automattic/vip-edge-workers-sdk
+
+Edge Workers let you run code at the CDN layer — before the cache, after the cache, before the origin, after the origin — with sub-millisecond overhead on every request. This SDK gives you the building blocks to write those workers in [AssemblyScript](https://www.assemblyscript.org/), a TypeScript-flavored language that compiles directly to WebAssembly (WASM).
+
+You write your worker as a set of handlers for whichever HTTP lifecycle phases you care about. The SDK handles all the plumbing — marshalling request and response data in and out of the WASM sandbox, managing the low-level ABI between the host runtime and your code — so you can focus on what your worker actually does: rewriting headers, short-circuiting to an early response, calling an upstream API, reading from a shared key-value store, or enforcing a rate limit.
+
+The compiled `.wasm` binary is what you deploy. It's typically a few kilobytes, cold-starts in microseconds, and runs in strict isolation — a fresh instance per request with no shared state between tenants.
+
+## Install
+
+```bash
+npm install @automattic/vip-edge-workers-sdk
+```
+
+## Quick start
+
+```ts
+import { onClientRequest, onClientResponse } from "@automattic/vip-edge-workers-sdk";
+
+// Re-export the ABI symbols for each phase you handle.
+// alloc is always required.
+export {
+  alloc,
+  on_client_request,
+  on_client_response,
+} from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+onClientRequest((req) => {
+  if (req.uri == "/healthz") {
+    req.respondText(200, "ok");  // short-circuit: skip origin entirely
+    return;
+  }
+  req.setHeader("x-edge-worker", "true");
+});
+
+onClientResponse((resp) => {
+  resp.setHeader("x-served-by", "edge");
+});
+```
+
+## Phases
+
+The host invokes the worker at up to four points per request:
+
+| Phase | Register with | ABI export | Body marker | When it runs |
+| --- | --- | --- | --- | --- |
+| Client request | `onClientRequest` | `on_client_request` | `client_request_body` | Before cache lookup. Only phase that can call `fetch()`. |
+| Origin request | `onOriginRequest` | `on_origin_request` | `origin_request_body` | Cache miss, before forwarding to origin. |
+| Client response | `onClientResponse` | `on_client_response` | `client_response_body` | After cache lookup, before sending to client. |
+| Origin response | `onOriginResponse` | `on_origin_response` | `origin_response_body` | Cache miss, after origin responds. |
+
+Only re-export the ABI symbols for phases your worker handles. `alloc` is always required. Re-export a body marker only when that phase needs the body buffered (see [Body access](#body-access)).
+
+## API
+
+### Registration
+
+```ts
+onClientRequest((req: HttpRequest) => void): void
+onOriginRequest((req: HttpRequest) => void): void
+onClientResponse((resp: HttpResponse) => void): void
+onOriginResponse((resp: HttpResponse) => void): void
+```
+
+Mutate `req` / `resp` in place. In request phases, call `req.respond()` or `req.respondText()` to return an early response without hitting origin or cache.
+
+---
+
+### Body access
+
+By default, `req.body` and `resp.body` are `null` — the host streams the body without buffering it. To have the body populated for a given phase, add its body marker to your ABI re-export block:
+
+```ts
+import { onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+export {
+  alloc,
+  on_client_request,
+  client_request_body,          // ← tells the host to buffer the request body
+} from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+onClientRequest((req) => {
+  const body = req.text();      // populated because the marker is exported
+});
+```
+
+| Phase | Marker |
+| --- | --- |
+| Client request | `client_request_body` |
+| Origin request | `origin_request_body` |
+| Client response | `client_response_body` |
+| Origin response | `origin_response_body` |
+
+The marker is a compile-time signal — its presence in the binary is what matters, not any runtime call. Workers that omit a marker pay no buffering cost for that phase.
+
+---
+
+### `HttpRequest`
+
+`HttpRequest` is your view into the incoming HTTP request. You receive it as the argument to `onClientRequest` and `onOriginRequest` handlers. Read its method, URI, headers, and body; mutate it in place to change what the upstream or origin sees; or call `respondText()` to short-circuit the entire request with an immediate reply — skipping cache and origin entirely.
+
+```ts
+onClientRequest((req) => {
+  // Header manipulation
+  const ua = req.getHeader("user-agent") || "unknown";
+  req.setHeader("x-ua", ua);
+  req.removeHeader("x-internal-token");
+
+  // Short-circuit with an early response
+  if (req.uri == "/robots.txt") {
+    req.respondText(200, "User-agent: *\nDisallow: /admin/", [
+      ["content-type", "text/plain"],
+    ]);
+    return;
+  }
+});
+```
+
+| Field / method | Type | Notes |
+| --- | --- | --- |
+| `method` | `string` | HTTP method (`"GET"`, `"POST"`, …) |
+| `uri` | `string` | Path and query string |
+| `body` | `Uint8Array \| null` | Raw request body; `null` if not buffered by the host |
+| `getHeader(name)` | `string \| null` | Case-insensitive lookup; first occurrence if duplicates exist |
+| `getHeaders()` | `string[][]` | All headers as `[name, value]` pairs, order and duplicates preserved; prefer `getHeader` for single lookups |
+| `setHeader(name, value)` | `void` | Replaces **all** existing values for that name; throws on invalid name/value or size limit exceeded |
+| `appendHeader(name, value)` | `void` | Appends a value without removing existing values — use for `Cookie` and other repeating headers |
+| `removeHeader(name)` | `void` | Removes all values for that name; no-op if absent |
+| `text()` | `string \| null` | UTF-8 decode of `body`; `null` if body is absent |
+| `bytes()` | `Uint8Array \| null` | Alias for `body` |
+| `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
+| `respond(status, body?, headers?)` | `void` | Short-circuit with a raw-bytes body |
+| `respondText(status, body?, headers?)` | `void` | Short-circuit with a string body (UTF-8 encoded) |
+| `bypassChallenge()` | `void` | Signal host to skip bot-protection for this request |
+| `forceChallenge()` | `void` | Signal host to present a bot-protection challenge for this request, even if it would not otherwise be challenged |
+
+---
+
+### `HttpResponse`
+
+`HttpResponse` represents an HTTP response — whether it came from the cache, the origin, or one of your `fetch()` calls. You receive it in `onClientResponse` and `onOriginResponse` handlers, and as the return value from `fetch()`. Read its status and headers; mutate them to change what the client sees; call `setCacheControl()` to override how the host caches the response.
+
+```ts
+onClientResponse((resp) => {
+  resp.setHeader("x-served-by", "edge");
+
+  if (resp.ok) {
+    resp.setCacheControl("public, max-age=60");
+  }
+});
+```
+
+| Field / getter / method | Type | Notes |
+| --- | --- | --- |
+| `status` | `u16` | HTTP status code; `0` on `fetch()` transport error |
+| `ok` | `bool` | `true` iff `status` is 200–299 |
+| `body` | `Uint8Array \| null` | Raw body bytes; `null` if not buffered by the host |
+| `errorKind` | `string \| null` | Transport error type; only set on `HttpResponse` values returned by `fetch()`, always `null` in response-phase handlers |
+| `errorMessage` | `string \| null` | Human-readable detail when `errorKind` is set |
+| `getHeader(name)` | `string \| null` | Case-insensitive lookup; first occurrence if duplicates exist |
+| `getHeaders()` | `string[][]` | All headers as `[name, value]` pairs, order and duplicates preserved; prefer `getHeader` for single lookups |
+| `setHeader(name, value)` | `void` | Replaces **all** existing values for that name; throws on invalid name/value or size limit exceeded |
+| `appendHeader(name, value)` | `void` | Appends a value without removing existing values — use for `Set-Cookie`, `Vary`, and other repeating headers |
+| `removeHeader(name)` | `void` | Removes all values for that name; no-op if absent |
+| `text()` | `string \| null` | UTF-8 decode of `body`; `null` if body is absent |
+| `bytes()` | `Uint8Array \| null` | Alias for `body` |
+| `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
+| `isError()` | `bool` | `true` iff `errorKind` is set |
+| `setCacheControl(value)` | `void` | Override the `Cache-Control` header for custom cache behaviour |
+
+---
+
+### HTML rewriting (`HtmlRules`)
+
+`HtmlRules` rewrites HTML response bodies without the bytes ever entering your worker. You declare a set of rules — CSS selector plus an action — and call `install()` once; the host runs them with [lol-html](https://github.com/cloudflare/lol-html) as the response streams to the client. The whole rule set crosses the host/guest boundary in a single call, so cost is constant no matter how many rules you add.
+
+**Prefer this over manual body editing whenever you can.** Because the host rewrites the response as a stream, your worker never buffers the body into WASM memory: there's nothing to allocate, nothing to copy across the sandbox boundary, and **no response-size ceiling** — a multi-megabyte page rewrites the same way a small one does. Manual editing (export an `*_response_body` marker, then `text()` / `setBodyText()`) forces the host to buffer the entire body so it fits in linear memory, which is slower, costs memory proportional to the response, and is bounded by the host's buffered-body limit. Reach for the manual path only when you genuinely need to compute the change from the body's own content (something no declarative rule can express).
+
+```ts
+import { onOriginResponse, HttpResponse, HtmlRules } from "@automattic/vip-edge-workers-sdk";
+
+export {
+  alloc,
+  on_origin_response,
+} from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+onOriginResponse((resp: HttpResponse): void => {
+  new HtmlRules()
+    .prependInside("head", '<script src="/analytics.js" defer></script>')
+    .setAttr("meta[name=robots]", "content", "noindex")
+    .removeAttr("a", "ping")
+    .rewriteAttrRe("a[href]", "href", "^http://", "https://")  // force outbound links to https
+    .remove("script[data-tracker]")
+    .install();
+});
+```
+
+**Phase and content-type rules:**
+
+- Effective only in response-phase handlers (`onClientResponse` / `onOriginResponse`). Rules registered in a request phase are silently dropped.
+- Applied only when the response `Content-Type` is `text/html` or `application/xhtml+xml`. JSON, images, etc. pass through untouched.
+- The body never enters the worker, so **do not** export an `*_response_body` marker for this — there is nothing to buffer.
+
+| Method | Signature | Action |
+| --- | --- | --- |
+| `insertBefore` | `(selector, html)` | Insert `html` immediately before each matching element |
+| `insertAfter` | `(selector, html)` | Insert `html` immediately after each matching element |
+| `prependInside` | `(selector, html)` | Insert `html` as the first child of each match |
+| `appendInside` | `(selector, html)` | Insert `html` as the last child of each match |
+| `replace` | `(selector, html)` | Replace each match (and its children) with `html` |
+| `remove` | `(selector)` | Remove each match (and its children) |
+| `setAttr` | `(selector, name, value)` | Set attribute `name` to `value` on each match |
+| `removeAttr` | `(selector, name)` | Remove attribute `name` from each match |
+| `rewriteAttrRe` | `(selector, name, pattern, template)` | Rewrite attribute `name` via `pattern.replace_all(template)` |
+| `setText` | `(selector, text)` | Replace the text content of each match (HTML-escaped) |
+| `install` | `() → void` | Submit the accumulated rules. Throws on any host validation error |
+
+**Notes:**
+
+- **Selectors** use lol-html's CSS subset — `a[href]`, `a[href^="/"]`, `div.cls`, `#id`, `header > nav`, and most position pseudo-classes.
+- **`html` arguments are inserted verbatim, not escaped.** Escape any user-controlled content yourself before passing it in. `setText` is the exception — its `text` is HTML-escaped by the host.
+- **`rewriteAttrRe`** uses Rust `regex` (RE2-style, no lookarounds). Templates support numbered captures (`$1`..`$9`), named captures (`${name}`), the whole match (`$0`), and `$$` for a literal `$`. The attribute is left untouched if absent or if the replacement is a no-op.
+- The builder is chainable; call `install()` **once** per worker. Two `install()` calls queue two separate rule sets.
+- Limits: ≤ 256 rules and ≤ 64 KiB total payload per call. `install()` throws on an oversize payload, an invalid selector, or a bad regex pattern.
+
+---
+
+### `fetch(url, method?, headers?, body?) → HttpResponse`
+
+Make an outbound HTTP request from the worker. From your code's perspective it's a regular synchronous call — the host suspends the WASM instance while the request is in flight and resumes it with the response. Errors are surfaced via fields rather than exceptions, so always check `resp.isError()` before reading the body.
+
+**Available in the client-request phase only.** Calling it from any other phase returns an `HttpResponse` with `errorKind` set to `"phase_not_allowed"`.
+
+```ts
+import { fetch, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+onClientRequest((req) => {
+  if (!req.uri.startsWith("/ip")) return;
+
+  const resp = fetch("https://ifconfig.me/ip", "GET", [["accept", "text/plain"]]);
+
+  if (resp.isError()) {
+    req.respondText(502, "fetch failed: " + resp.errorKind!);
+    return;
+  }
+
+  req.respondText(resp.status, resp.text(), [["content-type", "text/plain"]]);
+});
+```
+
+To send a request body:
+
+```ts
+const body = Uint8Array.wrap(String.UTF8.encode('{"key":"value"}'));
+const resp = fetch(
+  "https://api.example.com/v1/data",
+  "POST",
+  [["content-type", "application/json"]],
+  body,
+);
+```
+
+| Param | Type | Default |
+| --- | --- | --- |
+| `url` | `string` | required |
+| `method` | `string` | `"GET"` |
+| `headers` | `string[][]` | `[]` |
+| `body` | `Uint8Array \| null` | `null` |
+
+`errorKind` values: `timeout`, `too_many_inflight`, `request_too_large`, `response_too_large`, `body_read`, `transport`, `phase_not_allowed`.
+
+Host-enforced limits: 2 s end-to-end timeout · 10 MiB request body · 10 MiB response body · per-worker concurrency cap (FIFO queue).
+
+---
+
+### `KV`
+
+`KV` is a shared, host-backed key-value store. Unlike in-memory variables in your worker code — which are wiped at the end of every request because the WASM instance is discarded — `KV` persists data across requests and is shared across all instances running on the same site. It's useful for counters, feature flags, small configuration blobs, or any value that needs to outlive a single request.
+
+The store has two distinct modes. **Bytes** holds arbitrary values up to 10 KiB. **Counters** hold atomic 64-bit integers — useful for visit counts, quotas, or any value you need to increment safely under concurrent load. A key can only hold one type at a time; mixing them throws.
+
+Keys: max 64 bytes (UTF-8). Values: max 10 KiB. Entries are subject to site-wide LRU eviction; evicted counters reset to `0` on next access.
+
+**Bytes store**
+
+```ts
+import { KV, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+// PUT reads req.text() — export client_request_body to have the host buffer it.
+onClientRequest((req) => {
+  if (req.method == "PUT" && req.uri == "/note") {
+    KV.setText("note", req.text() || "");
+    req.respondText(200, "stored");
+    return;
+  }
+
+  if (req.method == "GET" && req.uri == "/note") {
+    const note = KV.getText("note");
+    req.respondText(note !== null ? 200 : 404, note || "no note stored");
+    return;
+  }
+});
+```
+
+| Method | Signature | Notes |
+| --- | --- | --- |
+| `get` | `(key: string) → Uint8Array \| null` | `null` = absent or counter key; zero-length = key exists with empty value |
+| `set` | `(key: string, value: Uint8Array) → void` | Throws if key > 64 B or value > 10 KiB |
+| `del` | `(key: string) → void` | No-op if absent; works on both types |
+| `getText` | `(key: string) → string \| null` | `get` + UTF-8 decode |
+| `setText` | `(key: string, value: string) → void` | UTF-8 encode + `set` |
+
+**Counter store**
+
+Atomic 64-bit integers. Absent counters read as `0` and are created on first write.
+
+```ts
+onClientRequest((req) => {
+  const visits = KV.incr("visits");  // atomic +1, returns new value
+  req.setHeader("x-visit-count", visits.toString());
+});
+```
+
+| Method | Signature | Notes |
+| --- | --- | --- |
+| `counterGet` | `(key: string) → i64` | `0` if absent; throws if key holds bytes |
+| `counterSet` | `(key: string, value: i64) → void` | Throws if key > 64 B or key holds bytes |
+| `incr` | `(key: string, delta: i64 = 1) → i64` | Atomic add; returns new value; initialises to `0` if absent; throws if key holds bytes |
+
+---
+
+### `RateLimit`
+
+`RateLimit` lets you enforce request rate limits at the edge, before a request ever reaches your origin. You define a named limiter with a target rate in requests per second, then check each incoming request against a key — typically a client IP or authenticated user ID. Each unique key gets its own independent token bucket, so the limit applies per-client rather than globally. Limiters are shared across all instances on the same site, so the rate is enforced consistently even under concurrent load.
+
+`register` is idempotent and safe to call on every request. The `rps` value is fixed at the first `register` call; later calls with the same name are no-ops regardless of what `rps` you pass.
+
+```ts
+import { RateLimit, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+onClientRequest((req) => {
+  if (!req.uri.startsWith("/api/")) return;
+
+  RateLimit.register("api", 50);
+  const ip = req.getHeader("x-forwarded-for") || "";
+  if (!RateLimit.check("api", ip)) {
+    req.respondText(429, "rate limited");
+    return;
+  }
+});
+```
+
+| Method | Signature | Notes |
+| --- | --- | --- |
+| `register` | `(name: string, rps: i32) → void` | Idempotent. Throws if name > 64 B, `rps` ≤ 0, or site-wide limiter quota (1000) exceeded |
+| `check` | `(name: string, key: string) → bool` | `true` = allowed, `false` = rate-limited. Throws if limiter not registered |
+
+**Choosing the key:** each unique key gets its own token bucket. Key on something an attacker cannot enumerate freely — client IP, authenticated user ID, a normalised path prefix. Never use `req.uri` directly; arbitrary query strings create unlimited unique buckets and defeat the limit.
+
+| Good | Bad |
+| --- | --- |
+| `req.getHeader("x-forwarded-for")` | `req.uri` — query strings make every request unique |
+| Authenticated user ID | Any user-supplied header or body value |
+| `req.uri.split("?")[0]` — normalised path | `req.uri` with arbitrary query params |
+
+---
+
+### `getenv(name) → string | null`
+
+Look up a host-provided environment variable. Variables are read-only and set at worker startup. Returns `null` if not set.
+
+```ts
+import { getenv, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+onClientRequest((req) => {
+  const key = getenv("API_KEY");
+  if (key !== null) req.setHeader("authorization", "Bearer " + key);
+});
+```
+
+---
+
+### Crypto
+
+Host-executed cryptographic primitives. No hash or HMAC code lives in the WASM binary — your worker binary stays small and the host handles all crypto operations.
+
+**HMAC-SHA256 / webhook signature verification**
+
+```ts
+import {
+  getenv, onClientRequest,
+  hmacSha256Str, secureCompare, hexEncode,
+} from "@automattic/vip-edge-workers-sdk";
+
+export {
+  alloc, on_client_request, client_request_body,
+} from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+onClientRequest((req) => {
+  const secret = getenv("WEBHOOK_SECRET");
+  if (secret === null) { req.respondText(500, "not configured"); return; }
+
+  const sig      = req.getHeader("x-hub-signature-256") || "";
+  const expected = "sha256=" + hexEncode(hmacSha256Str(secret, req.text() || ""));
+
+  const a = Uint8Array.wrap(String.UTF8.encode(sig));
+  const b = Uint8Array.wrap(String.UTF8.encode(expected));
+  if (!secureCompare(a, b)) { req.respondText(401, "invalid signature"); return; }
+});
+```
+
+**HS256 JWT verification**
+
+```ts
+import { getenv, onClientRequest, jwtVerifyHs256 } from "@automattic/vip-edge-workers-sdk";
+
+onClientRequest((req) => {
+  const auth = req.getHeader("authorization") || "";
+  if (!auth.startsWith("Bearer ")) { req.respondText(401, "missing token"); return; }
+
+  const claims = jwtVerifyHs256(auth.slice(7), getenv("JWT_SECRET") || "");
+  if (claims === null) { req.respondText(401, "invalid or expired token"); return; }
+
+  // claims is the raw JSON payload — parse with json-as if you need specific fields,
+  // or forward it to the origin as a header.
+  req.setHeader("x-jwt-claims", claims);
+});
+```
+
+| Function | Signature | Notes |
+| --- | --- | --- |
+| `hmacSha256` | `(key: Uint8Array, msg: Uint8Array) → Uint8Array` | 32-byte HMAC-SHA256 digest |
+| `hmacSha256Str` | `(key: string, msg: string) → Uint8Array` | Convenience: UTF-8 encodes both inputs |
+| `sha256` | `(msg: Uint8Array) → Uint8Array` | 32-byte SHA-256 digest |
+| `secureCompare` | `(a: Uint8Array, b: Uint8Array) → bool` | Timing-attack-safe comparison; execution time depends only on input length, not content |
+| `jwtVerifyHs256` | `(token: string, secret: string) → string \| null` | Verifies alg, signature, and `exp`; returns claims JSON or `null` |
+| `hexEncode` | `(bytes: Uint8Array) → string` | Lowercase hex string (two characters per byte) |
+
+`jwtVerifyHs256` validates `alg: "HS256"` strictly — RS256 / ES256 tokens return `null`. `exp` is checked against wall clock; `nbf` and `iat` are not enforced.
+
+Secrets should come from `getenv()` — injected at deploy time, never visible in the binary or on the wire.
+
+---
+
+### Parsing JSON
+
+The SDK does not include a JSON library. Workers that need to parse structured JSON bodies add [`json-as`](https://www.npmjs.com/package/json-as) directly to their own `package.json` and pass `--transform json-as` to `asc`. Workers that don't parse JSON pay nothing — no serialization code is included in their binary.
+
+```ts
+import { JSON } from "json-as";
+import { fetch, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+@json
+class Todo {
+  id: i32 = 0;
+  title: string = "";
+  completed: bool = false;
+}
+
+@json
+class Summary {
+  id: i32 = 0;
+  title: string = "";
+  done: bool = false;
+}
+
+onClientRequest((req) => {
+  if (!req.uri.startsWith("/todo/")) return;
+
+  const resp = fetch("https://jsonplaceholder.typicode.com/todos/" + req.uri.slice(6));
+  if (!resp.ok) { req.respondText(resp.status, "not found"); return; }
+
+  const todo = JSON.parse<Todo>(resp.text()!);
+
+  const out = new Summary();
+  out.id = todo.id;
+  out.title = todo.title;
+  out.done = todo.completed;
+
+  req.respondText(200, JSON.stringify(out), [["content-type", "application/json"]]);
+});
+```
+
+## Building code
+
+Your worker source is [AssemblyScript](https://www.assemblyscript.org/) — a TypeScript-flavored language that compiles to WebAssembly bytecode using `asc`, the AssemblyScript compiler. Unlike TypeScript, which transpiles to JavaScript, AssemblyScript compiles all the way down to a `.wasm` binary with no JavaScript runtime dependency. The result is a small, self-contained file that the host loads and executes directly.
+
+One compiler flag is always required, and two are strongly recommended for release builds:
+
+- **`--runtime stub`** uses a simple bump allocator with no garbage collector. Each request starts with a fresh heap and all memory is reclaimed when the request ends — there is nothing for a GC to manage.
+- **`--optimizeLevel 3`** runs the full Binaryen optimiser. Without it, binaries are significantly larger and slower.
+- **`--shrinkLevel 2`** tells the optimiser to prefer size over speed (`-Oz` equivalent) — inlines less, merges similar code. Typically cuts an additional 15–25% off the release binary.
+
+If your worker parses JSON bodies, also add **`--transform json-as`** (see [Parsing JSON](#parsing-json)).
+
+```js
+// build.mjs
+import { execFileSync } from 'child_process';
+import { mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const root = dirname(fileURLToPath(import.meta.url));
+const nodeModules = resolve(root, 'node_modules');
+const { NODE_OPTIONS: _drop, ...env } = process.env;
+
+mkdirSync(resolve(root, 'build'), { recursive: true });
+
+execFileSync(resolve(nodeModules, '.bin/asc'), [
+  resolve(root, 'assembly/index.ts'),
+  '--outFile', resolve(root, 'build/release.wasm'),
+  '--runtime', 'stub',
+  '--optimizeLevel', '3',
+  '--shrinkLevel', '2',
+  '--path', nodeModules,
+], { cwd: nodeModules, env, stdio: 'inherit' });
+```
+
+Working examples under [`examples/`](examples):
+
+| Example | What it shows |
+| --- | --- |
+| [`fetch`](examples/fetch) | Outbound `fetch()` — proxy a route to an external API |
+| [`kv`](examples/kv) | KV bytes store + atomic counter forwarded to origin as a header |
+| [`rate-limit`](examples/rate-limit) | Per-path rate limiting with `RateLimit` |
+| [`json`](examples/json) | Parse a JSON API response into a typed `@json` class |
+| [`html-rewrite`](examples/html-rewrite) | Declarative HTML rewriting with `HtmlRules` — anonymize outbound links via href.li |
+| [`redirect`](examples/redirect) | 301 redirects — rename a path prefix and strip trailing slashes |
+| [`rewrite`](examples/rewrite) | Internal rewrite — repoint host + URI before cache lookup, no client-visible redirect |
+| [`headers`](examples/headers) | Override `Cache-Control` on the origin response |
+| [`webhook`](examples/webhook) | HMAC-SHA256 webhook signature verification (GitHub style) |
+| [`udger`](examples/udger) | Device/crawler detection via the Udger Cloud Parser API + `getenv` secret |
+
+Run `make examples` to build all of them.
+
+## Notes
+
+**Bodies are opt-in.** `req.body` and `resp.body` are `null` by default; see [Body access](#body-access) to enable buffering per phase. `fetch()` response bodies are always available. Use `text()` / `bytes()` to read; `setBodyText()` to replace.
+
+**Bodies are raw bytes** (`Uint8Array`). Use `text()` / `setBodyText()` for UTF-8 strings; `JSON.parse` (via json-as) for structured JSON; everything else (binary, compressed, …) is plain bytes.
+
+**Headers** — `setHeader` replaces all existing values for a name; `appendHeader` adds a value alongside existing ones (use for `Set-Cookie`, `Vary`, etc.); `getHeader` returns the first occurrence; `getHeaders()` returns all pairs in order. Header names are normalised to lowercase. Name limit: 1 KiB; value limit: 64 KiB — `setHeader` and `appendHeader` throw if either is exceeded.
+
+**Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a request. Each request starts from a clean heap with no state carried over from prior requests or other workers — full isolation is guaranteed.
