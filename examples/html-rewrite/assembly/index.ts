@@ -13,14 +13,14 @@
 // responses; other content-types pass through untouched. The response body
 // never enters the worker — lol-html runs server-side.
 
-import { HttpResponse, onOriginResponse, HtmlRules } from "@automattic/vip-edge-workers-sdk";
+import { Response, onOriginResponse, HtmlRules } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
   on_origin_response,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
-onOriginResponse((_resp: HttpResponse): void => {
+onOriginResponse((_resp: Response): void => {
   new HtmlRules()
     // Capture the protocol so it's preserved in the wrapped URL. Only
     // touches absolute http(s) links — relative hrefs are left alone.

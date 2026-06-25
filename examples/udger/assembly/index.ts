@@ -11,7 +11,7 @@
 // Cloud Parser docs: https://udger.com/support/documentation/?doc=77
 
 import { JSON } from "json-as";
-import { HttpRequest, onClientRequest, fetch, getenv } from "@automattic/vip-edge-workers-sdk";
+import { Request, Headers, onClientRequest, fetch, getenv } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
@@ -41,15 +41,15 @@ class UdgerInfo {
   ip_address: UdgerIpAddress = new UdgerIpAddress();
 }
 
-onClientRequest((req: HttpRequest): void => {
+onClientRequest((req: Request): void => {
   const apiKey = getenv("UDGER_API_KEY");
   if (apiKey === null) return; // not configured — pass through
 
-  const ua = req.getHeader("user-agent") || "";
+  const ua = req.headers.get("user-agent") || "";
 
   // x-forwarded-for may be a comma-separated chain; the leftmost entry is
   // the original client.
-  let xff = req.getHeader("x-forwarded-for") || "";
+  let xff = req.headers.get("x-forwarded-for") || "";
   const comma = xff.indexOf(",");
   if (comma >= 0) xff = xff.slice(0, comma);
   const ip = xff.trim();
@@ -72,11 +72,11 @@ onClientRequest((req: HttpRequest): void => {
   const agent = info.user_agent;
 
   if (agent.ua_class == "Crawler") {
-    req.respondText(403, "crawlers not allowed", [["content-type", "text/plain"]]);
+    req.respondText(403, "crawlers not allowed", new Headers([["content-type", "text/plain"]]));
     return;
   }
 
   // Tag the upstream request so origin / cache key can use the classification.
-  if (agent.device_class != "") req.setHeader("x-udger-device-class", agent.device_class);
-  if (agent.ua_class != "")     req.setHeader("x-udger-ua-class",     agent.ua_class);
+  if (agent.device_class != "") req.headers.set("x-udger-device-class", agent.device_class);
+  if (agent.ua_class != "")     req.headers.set("x-udger-ua-class",     agent.ua_class);
 });

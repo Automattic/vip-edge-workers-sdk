@@ -56,92 +56,234 @@ export function _resetResponseSent(): void { _responseSent = false; }
 // --- Public types ---
 
 /**
- * Represents the inbound HTTP request in a request-phase handler.
+ * A WHATWG-style view over a set of HTTP headers, as exposed by
+ * {@link Request.headers} and {@link Response.headers}, or constructed
+ * standalone via `new Headers(...)`.
  *
- * Mutate fields directly or use the helper methods to modify headers and body.
- * Call {@link respond} or {@link respondText} to short-circuit the request and
- * return a response to the client without forwarding to origin.
- *
- * Available in: {@link onClientRequest}, {@link onOriginRequest}.
+ * Header names are normalised to lowercase, matching the WHATWG spec. A
+ * `Headers` bound to a live request/response proxies every operation to the
+ * host's header map, so mutations take effect immediately on the in-flight
+ * message. A standalone `Headers` (or one carried by a {@link fetch} result)
+ * is backed by a local list.
  */
-export class HttpRequest {
-  /** HTTP method (e.g. `"GET"`, `"POST"`). */
-  method: string = "";
-  /** Request URI including path and query string (e.g. `"/search?q=foo"`). */
-  uri: string = "";
-  /** Raw request body bytes, or `null` if the request has no body. */
-  body: Uint8Array | null = null;
+export class Headers {
+  // _live === true: operations proxy to the host's header map for the current
+  // request/response phase. _live === false: operations use the local
+  // _entries list (fetch results, responses built with `new Response`, and
+  // standalone `new Headers`).
+  private _live: bool = false;
+  private _entries: string[][] = [];
 
   /**
-   * Look up a request header by name (case-insensitive).
+   * Construct a `Headers` from an optional list of `[name, value]` pairs.
+   * Names are lowercased. Pairs are appended in order, so duplicates are kept.
+   *
+   * @param init - Initial `[name, value]` pairs, or `null` for an empty set.
+   */
+  constructor(init: string[][] | null = null) {
+    if (init !== null) {
+      for (let i = 0; i < init.length; i++) {
+        this.append(init[i][0], init[i][1]);
+      }
+    }
+  }
+
+  /** @internal Bind a `Headers` to the host's live header map. */
+  static _bindLive(): Headers {
+    const h = new Headers();
+    h._live = true;
+    return h;
+  }
+
+  /** @internal Build a local `Headers` from already-lowercased pairs. */
+  static _fromPairs(pairs: string[][]): Headers {
+    const h = new Headers();
+    h._entries = pairs;
+    return h;
+  }
+
+  // All [name, value] pairs as a fresh array. Names are lowercase.
+  private _list(): string[][] {
+    if (this._live) {
+      const packed = _header_list();
+      if (packed < 0) return [];
+      // @ts-ignore — i32() is an AS truncation cast; >>> is valid on i64 in AS
+      const ptr = i32(packed >>> 32);
+      // @ts-ignore
+      const len = i32(packed & 0xffffffff);
+      const r = new MsgpackReader(<usize>ptr, <usize>len);
+      return r.readStrPairArray();
+    }
+    const out: string[][] = [];
+    for (let i = 0; i < this._entries.length; i++) {
+      out.push([this._entries[i][0], this._entries[i][1]]);
+    }
+    return out;
+  }
+
+  /**
+   * Return the value for `name` (case-insensitive). When the header appears
+   * more than once on a local `Headers`, the values are joined with `", "`.
    *
    * @param name - Header name to look up.
-   * @returns The header value, or `null` if not present.
+   * @returns The value, or `null` if the header is absent.
    */
-  getHeader(name: string): string | null {
-    const nameBuf = String.UTF8.encode(asciiLower(name));
-    const packed = _header_get(changetype<i32>(nameBuf), nameBuf.byteLength);
-    if (packed < 0) return null;
-    // @ts-ignore — i32() is an AS truncation cast; >>> is valid on i64 in AS
-    const ptr = i32(packed >>> 32);
-    // @ts-ignore
-    const len = i32(packed & 0xffffffff);
-    return String.UTF8.decodeUnsafe(ptr, len);
+  get(name: string): string | null {
+    const lower = asciiLower(name);
+    if (this._live) {
+      const nameBuf = String.UTF8.encode(lower);
+      const packed = _header_get(changetype<i32>(nameBuf), nameBuf.byteLength);
+      if (packed < 0) return null;
+      // @ts-ignore
+      const ptr = i32(packed >>> 32);
+      // @ts-ignore
+      const len = i32(packed & 0xffffffff);
+      return String.UTF8.decodeUnsafe(ptr, len);
+    }
+    let found: string | null = null;
+    for (let i = 0; i < this._entries.length; i++) {
+      if (this._entries[i][0] == lower) {
+        found = found === null ? this._entries[i][1] : found + ", " + this._entries[i][1];
+      }
+    }
+    return found;
   }
 
   /**
-   * Return all headers as `[name, value]` pairs, preserving order and duplicates.
+   * Test whether a header named `name` is present (case-insensitive).
    *
-   * Materialises the full header list via a host call. Use {@link getHeader}
-   * for single-key lookups.
-   *
-   * @returns An array of `[name, value]` pairs. Names are lowercase.
+   * @param name - Header name to test.
    */
-  getHeaders(): string[][] {
-    const packed = _header_list();
-    if (packed < 0) return [];
-    // @ts-ignore
-    const ptr = i32(packed >>> 32);
-    // @ts-ignore
-    const len = i32(packed & 0xffffffff);
-    const r = new MsgpackReader(<usize>ptr, <usize>len);
-    return r.readStrPairArray();
+  has(name: string): bool {
+    return this.get(name) !== null;
   }
 
   /**
-   * Set a request header. Replaces all existing values for the same name
+   * Set `name` to `value`, replacing any existing values for that name
    * (case-insensitive).
    *
    * @param name - Header name (ASCII only, max 1 KiB).
    * @param value - Header value (max 64 KiB).
    * @throws If the name or value is invalid or exceeds the host-enforced size limits.
    */
-  setHeader(name: string, value: string): void {
-    headerSet(name, value);
+  set(name: string, value: string): void {
+    if (this._live) { headerSet(name, value); return; }
+    const lower = asciiLower(name);
+    const next: string[][] = [];
+    for (let i = 0; i < this._entries.length; i++) {
+      if (this._entries[i][0] != lower) next.push(this._entries[i]);
+    }
+    next.push([lower, value]);
+    this._entries = next;
   }
 
   /**
-   * Remove all request headers with the given name (case-insensitive).
-   * No-op if the header is not present.
-   *
-   * @param name - Header name to remove.
-   */
-  removeHeader(name: string): void {
-    const nameBuf = String.UTF8.encode(asciiLower(name));
-    _header_delete(changetype<i32>(nameBuf), nameBuf.byteLength);
-  }
-
-  /**
-   * Append a value for `name` without removing existing values.
-   * Use this for headers that legitimately repeat, such as `Cookie`.
+   * Append `value` under `name` without removing existing values.
+   * Use this for headers that legitimately repeat, such as `Set-Cookie`.
    *
    * @param name - Header name (ASCII only, max 1 KiB).
    * @param value - Header value to append (max 64 KiB).
    * @throws If the name or value is invalid or exceeds the host-enforced size limits.
    */
-  appendHeader(name: string, value: string): void {
-    headerAppend(name, value);
+  append(name: string, value: string): void {
+    if (this._live) { headerAppend(name, value); return; }
+    this._entries.push([asciiLower(name), value]);
   }
+
+  /**
+   * Remove all values for `name` (case-insensitive). No-op if absent.
+   *
+   * @param name - Header name to remove.
+   */
+  delete(name: string): void {
+    const lower = asciiLower(name);
+    if (this._live) {
+      const nameBuf = String.UTF8.encode(lower);
+      _header_delete(changetype<i32>(nameBuf), nameBuf.byteLength);
+      return;
+    }
+    const next: string[][] = [];
+    for (let i = 0; i < this._entries.length; i++) {
+      if (this._entries[i][0] != lower) next.push(this._entries[i]);
+    }
+    this._entries = next;
+  }
+
+  /**
+   * Return every `Set-Cookie` value as a separate string.
+   *
+   * @returns One entry per `Set-Cookie` header, in order.
+   */
+  getSetCookie(): string[] {
+    const all = this._list();
+    const out: string[] = [];
+    for (let i = 0; i < all.length; i++) {
+      if (all[i][0] == "set-cookie") out.push(all[i][1]);
+    }
+    return out;
+  }
+
+  /**
+   * All headers as `[name, value]` pairs, preserving order and duplicates.
+   * (Returns an array rather than a lazy iterator — AssemblyScript has no
+   * generators.)
+   */
+  entries(): string[][] {
+    return this._list();
+  }
+
+  /** All header names, in order (duplicates included). */
+  keys(): string[] {
+    const all = this._list();
+    const out: string[] = [];
+    for (let i = 0; i < all.length; i++) out.push(all[i][0]);
+    return out;
+  }
+
+  /** All header values, in order. */
+  values(): string[] {
+    const all = this._list();
+    const out: string[] = [];
+    for (let i = 0; i < all.length; i++) out.push(all[i][1]);
+    return out;
+  }
+
+  /**
+   * Invoke `callback(value, name, parent)` for each header, in order.
+   *
+   * @param callback - Receives the value, the lowercase name, and this `Headers`.
+   */
+  forEach(callback: (value: string, key: string, parent: Headers) => void): void {
+    const all = this._list();
+    for (let i = 0; i < all.length; i++) {
+      callback(all[i][1], all[i][0], this);
+    }
+  }
+}
+
+/**
+ * The inbound HTTP request in a request-phase handler.
+ *
+ * Mutate {@link method}, {@link url}, {@link headers}, or {@link body} in
+ * place to change what origin sees, or call {@link respondWith} /
+ * {@link respondText} to short-circuit the request and return a response to
+ * the client without forwarding to origin.
+ *
+ * Available in: {@link onClientRequest}, {@link onOriginRequest}.
+ */
+export class Request {
+  /** HTTP method (e.g. `"GET"`, `"POST"`). */
+  method: string = "";
+  /**
+   * Request target: path and query string (e.g. `"/search?q=foo"`). Named
+   * `url` to match the WHATWG `Request.url` property; note that, unlike a
+   * browser `Request`, this is the origin-relative target, not an absolute URL.
+   */
+  url: string = "";
+  /** Request headers. Mutations apply to the in-flight request. */
+  headers: Headers = new Headers();
+  /** Raw request body bytes, or `null` if the request has no body. */
+  body: Uint8Array | null = null;
 
   /**
    * Decode the request body as a UTF-8 string.
@@ -162,6 +304,16 @@ export class HttpRequest {
   }
 
   /**
+   * Return the body as an `ArrayBuffer` (a copy). Mirrors WHATWG
+   * `Request.arrayBuffer()`, but synchronous — there is no `Promise`.
+   *
+   * @returns A fresh `ArrayBuffer`, or `null` if the body is absent.
+   */
+  arrayBuffer(): ArrayBuffer | null {
+    return bodyArrayBuffer(this.body);
+  }
+
+  /**
    * UTF-8 encode `text` and store it as the request body.
    * Pass `null` to clear the body.
    *
@@ -172,38 +324,45 @@ export class HttpRequest {
   }
 
   /**
-   * Short-circuit the request: return a response to the client without
-   * forwarding to origin.
+   * Short-circuit the request: send `response` to the client without
+   * forwarding to origin. Mirrors the WHATWG service-worker
+   * `FetchEvent.respondWith` shape.
    *
-   * Headers must be supplied explicitly — request headers are not echoed
-   * onto the early response. The host adds `content-length` automatically
-   * and strips hop-by-hop headers; do not set those yourself.
+   * Headers come solely from `response` — request headers are not echoed onto
+   * it. The host adds `content-length` automatically and strips hop-by-hop
+   * headers; do not set those yourself.
    *
    * Return from the handler immediately after calling this. If you call it
-   * again, the later call's `status` and `body` replace the earlier one's,
-   * but accumulated `headers` from prior calls persist.
+   * again, the later call's status and body replace the earlier one's, but
+   * accumulated headers from prior calls persist.
    *
-   * @param status - HTTP status code (100–599).
-   * @param body - Raw response body bytes. Defaults to no body.
-   * @param headers - Response headers as `[name, value]` pairs.
+   * @param response - The response to send.
    */
-  respond(status: u16, body: Uint8Array | null = null, headers: string[][] = []): void {
-    for (let i = 0; i < headers.length; i++) {
-      responseHeaderSet(headers[i][0], headers[i][1]);
+  respondWith(response: Response): void {
+    const entries = response.headers.entries();
+    for (let i = 0; i < entries.length; i++) {
+      responseHeaderAppend(entries[i][0], entries[i][1]);
     }
-    responseSend(status, body);
+    responseSend(response.status, response.body);
   }
 
   /**
-   * Short-circuit the request with a plain-text body. Convenience wrapper
-   * around {@link respond} that UTF-8 encodes `body`.
+   * Convenience: short-circuit the request with a plain-text body (UTF-8
+   * encoded). Equivalent to building a {@link Response} and passing it to
+   * {@link respondWith}.
    *
    * @param status - HTTP status code (100–599).
    * @param body - Response body string. Defaults to no body.
-   * @param headers - Response headers as `[name, value]` pairs.
+   * @param headers - Response headers, or `null` for none.
    */
-  respondText(status: u16, body: string | null = null, headers: string[][] = []): void {
-    this.respond(status, encodeBodyText(body), headers);
+  respondText(status: u16, body: string | null = null, headers: Headers | null = null): void {
+    if (headers !== null) {
+      const entries = headers.entries();
+      for (let i = 0; i < entries.length; i++) {
+        responseHeaderAppend(entries[i][0], entries[i][1]);
+      }
+    }
+    responseSend(status, encodeBodyText(body));
   }
 
   /**
@@ -211,7 +370,7 @@ export class HttpRequest {
    * for this request.
    */
   bypassChallenge(): void {
-    this.setHeader("x-bypass-challenge", "1");
+    this.headers.set("x-bypass-challenge", "1");
   }
 
   /**
@@ -219,7 +378,7 @@ export class HttpRequest {
    * this request, even if it would not otherwise be challenged.
    */
   forceChallenge(): void {
-    this.setHeader("x-force-challenge", "1");
+    this.headers.set("x-force-challenge", "1");
   }
 
   /** @internal */
@@ -227,40 +386,57 @@ export class HttpRequest {
     const w = new MsgpackWriter();
     w.writeArray(2);
     w.writeStr(this.method);
-    w.writeStr(this.uri);
+    w.writeStr(this.url);
     return w.toArrayBuffer();
   }
 
   /** @internal */
-  static unpack(base: usize, len: usize): HttpRequest {
+  static unpack(base: usize, len: usize): Request {
     const r = new MsgpackReader(base, len);
-    const req = new HttpRequest();
+    const req = new Request();
     r.readArraySize(); // 2
     req.method = r.readStr();
-    req.uri = r.readStr();
+    req.url = r.readStr();
+    req.headers = Headers._bindLive();
     return req;
   }
 }
 
 /**
- * Represents an HTTP response — either a proxy response in a response-phase
- * handler, or the result of an outbound {@link fetch} call.
+ * Initialisation options for `new Response(body, init)`. Mirrors the WHATWG
+ * `ResponseInit` dictionary. As an options bag with no constructor, it can be
+ * written as an object literal: `{ status: 404, headers: h }`.
+ */
+export class ResponseInit {
+  /** HTTP status code. Defaults to `200`. */
+  status: u16 = 200;
+  /** HTTP status text. Advisory only — not sent on the wire by this host. */
+  statusText: string = "";
+  /** Response headers, or `null` for none. */
+  headers: Headers | null = null;
+}
+
+/**
+ * An HTTP response — a proxy response in a response-phase handler, the result
+ * of an outbound {@link fetch} call, or one you build yourself with
+ * `new Response(body, init)` to pass to {@link Request.respondWith}.
  *
- * In response phases, mutate fields or use the helpers to modify what gets
- * sent to the client. For {@link fetch} results, fields are read-only in
- * practice — the host does not observe mutations on them.
+ * In response phases, mutate fields or {@link headers} to modify what gets
+ * sent to the client. For {@link fetch} results, fields are effectively
+ * read-only — the host does not observe mutations on them.
  *
  * Available in: {@link onClientResponse}, {@link onOriginResponse}, and as
  * the return value of {@link fetch}.
  */
-export class HttpResponse {
+export class Response {
   /** HTTP status code. `0` on a transport-level error from {@link fetch}. */
-  status: u16 = 0;
+  status: u16 = 200;
+  /** HTTP status text. Advisory only — not provided by this host on the wire. */
+  statusText: string = "";
+  /** Response headers. */
+  headers: Headers = new Headers();
   /** Raw response body bytes, or `null` if the response has no body. */
   body: Uint8Array | null = null;
-  // Fetch responses carry headers in the msgpack payload; proxy responses use host functions.
-  private _fromFetch: bool = false;
-  private _fetchHeaders: string[][] = [];
 
   /**
    * Set by {@link fetch} when the host could not complete the outbound
@@ -280,6 +456,24 @@ export class HttpResponse {
   errorMessage: string | null = null;
 
   /**
+   * Construct a response. Mirrors the WHATWG `new Response(body, init)` shape,
+   * for use with {@link Request.respondWith}.
+   *
+   * @param body - Raw body bytes, or `null` for no body. (For a string body,
+   *   build one with {@link setBodyText}, or use {@link Request.respondText}.)
+   * @param init - Optional status / statusText / headers.
+   */
+  constructor(body: Uint8Array | null = null, init: ResponseInit | null = null) {
+    this.body = body;
+    if (init !== null) {
+      this.status = init.status;
+      this.statusText = init.statusText;
+      const h = init.headers;
+      if (h !== null) this.headers = h;
+    }
+  }
+
+  /**
    * Whether this response represents a host-level transport failure.
    * Always `false` for proxy responses.
    *
@@ -287,85 +481,6 @@ export class HttpResponse {
    */
   isError(): bool {
     return this.errorKind !== null;
-  }
-
-  /**
-   * Look up a response header by name (case-insensitive).
-   *
-   * @param name - Header name to look up.
-   * @returns The header value, or `null` if not present.
-   */
-  getHeader(name: string): string | null {
-    if (this._fromFetch) {
-      const lower = asciiLower(name);
-      for (let i = 0; i < this._fetchHeaders.length; i++) {
-        if (this._fetchHeaders[i][0] == lower) return this._fetchHeaders[i][1];
-      }
-      return null;
-    }
-    const nameBuf = String.UTF8.encode(asciiLower(name));
-    const packed = _header_get(changetype<i32>(nameBuf), nameBuf.byteLength);
-    if (packed < 0) return null;
-    // @ts-ignore
-    const ptr = i32(packed >>> 32);
-    // @ts-ignore
-    const len = i32(packed & 0xffffffff);
-    return String.UTF8.decodeUnsafe(ptr, len);
-  }
-
-  /**
-   * Return all headers as `[name, value]` pairs, preserving order and duplicates.
-   *
-   * For proxy responses, materialises the full header list via a host call.
-   * Use {@link getHeader} for single-key lookups.
-   *
-   * @returns An array of `[name, value]` pairs. Names are lowercase.
-   */
-  getHeaders(): string[][] {
-    if (this._fromFetch) return this._fetchHeaders.slice();
-    const packed = _header_list();
-    if (packed < 0) return [];
-    // @ts-ignore
-    const ptr = i32(packed >>> 32);
-    // @ts-ignore
-    const len = i32(packed & 0xffffffff);
-    const r = new MsgpackReader(<usize>ptr, <usize>len);
-    return r.readStrPairArray();
-  }
-
-  /**
-   * Set a response header. Replaces all existing values for the same name
-   * (case-insensitive).
-   *
-   * @param name - Header name (ASCII only, max 1 KiB).
-   * @param value - Header value (max 64 KiB).
-   * @throws If the name or value is invalid or exceeds the host-enforced size limits.
-   */
-  setHeader(name: string, value: string): void {
-    headerSet(name, value);
-  }
-
-  /**
-   * Remove all response headers with the given name (case-insensitive).
-   * No-op if the header is not present.
-   *
-   * @param name - Header name to remove.
-   */
-  removeHeader(name: string): void {
-    const nameBuf = String.UTF8.encode(asciiLower(name));
-    _header_delete(changetype<i32>(nameBuf), nameBuf.byteLength);
-  }
-
-  /**
-   * Append a value for `name` without removing existing values.
-   * Use this for headers that legitimately repeat, such as `Set-Cookie`.
-   *
-   * @param name - Header name (ASCII only, max 1 KiB).
-   * @param value - Header value to append (max 64 KiB).
-   * @throws If the name or value is invalid or exceeds the host-enforced size limits.
-   */
-  appendHeader(name: string, value: string): void {
-    headerAppend(name, value);
   }
 
   /**
@@ -396,6 +511,16 @@ export class HttpResponse {
   }
 
   /**
+   * Return the body as an `ArrayBuffer` (a copy). Mirrors WHATWG
+   * `Response.arrayBuffer()`, but synchronous — there is no `Promise`.
+   *
+   * @returns A fresh `ArrayBuffer`, or `null` if the body is absent.
+   */
+  arrayBuffer(): ArrayBuffer | null {
+    return bodyArrayBuffer(this.body);
+  }
+
+  /**
    * UTF-8 encode `text` and store it as the response body.
    * Pass `null` to clear the body.
    *
@@ -412,8 +537,8 @@ export class HttpResponse {
    * @param value - Replacement `Cache-Control` value (e.g. `"public, max-age=60"`).
    */
   setCacheControl(value: string): void {
-    this.setHeader("cache-control", value);
-    this.setHeader("x-original-cache-control", value);
+    this.headers.set("cache-control", value);
+    this.headers.set("x-original-cache-control", value);
   }
 
   /** @internal */
@@ -425,24 +550,24 @@ export class HttpResponse {
   }
 
   /** @internal */
-  static unpack(base: usize, len: usize): HttpResponse {
+  static unpack(base: usize, len: usize): Response {
     const r = new MsgpackReader(base, len);
-    const resp = new HttpResponse();
+    const resp = new Response();
     r.readArraySize(); // 1
     resp.status = r.readUint16();
+    resp.headers = Headers._bindLive();
     return resp;
   }
 
   /** @internal */
-  static unpackFetch(base: usize, len: usize): HttpResponse {
+  static unpackFetch(base: usize, len: usize): Response {
     const r = new MsgpackReader(base, len);
-    const resp = new HttpResponse();
+    const resp = new Response();
     r.readArraySize();
     resp.status = r.readUint16();
-    resp._fetchHeaders = r.readStrPairArray();
+    resp.headers = Headers._fromPairs(r.readStrPairArray());
     resp.errorKind = r.readStrOrNil();
     resp.errorMessage = r.readStrOrNil();
-    resp._fromFetch = true;
     return resp;
   }
 }
@@ -450,9 +575,9 @@ export class HttpResponse {
 // --- Handler registration ---
 
 /** Handler function signature for request-phase callbacks. */
-export type RequestHandler = (req: HttpRequest) => void;
+export type RequestHandler = (req: Request) => void;
 /** Handler function signature for response-phase callbacks. */
-export type ResponseHandler = (resp: HttpResponse) => void;
+export type ResponseHandler = (resp: Response) => void;
 
 export let _onClientRequest: RequestHandler | null = null;
 export let _onOriginRequest: RequestHandler | null = null;
@@ -464,10 +589,10 @@ export let _onOriginResponse: ResponseHandler | null = null;
  *
  * Runs on every request before the cache lookup. This is the only phase
  * in which {@link fetch} may be called. Call
- * {@link HttpRequest.respond} / {@link HttpRequest.respondText} inside the
+ * {@link Request.respondWith} / {@link Request.respondText} inside the
  * handler to return an early response without hitting origin.
  *
- * @param handler - Function that receives and may mutate the {@link HttpRequest}.
+ * @param handler - Function that receives and may mutate the {@link Request}.
  */
 export function onClientRequest(handler: RequestHandler): void {
   _onClientRequest = handler;
@@ -479,7 +604,7 @@ export function onClientRequest(handler: RequestHandler): void {
  * Runs on a cache miss, after the client-request phase and before the
  * request is forwarded to origin. Not invoked on cache hits.
  *
- * @param handler - Function that receives and may mutate the {@link HttpRequest}.
+ * @param handler - Function that receives and may mutate the {@link Request}.
  */
 export function onOriginRequest(handler: RequestHandler): void {
   _onOriginRequest = handler;
@@ -491,7 +616,7 @@ export function onOriginRequest(handler: RequestHandler): void {
  * Runs after the cache lookup (hit or miss), before the response is sent
  * to the client.
  *
- * @param handler - Function that receives and may mutate the {@link HttpResponse}.
+ * @param handler - Function that receives and may mutate the {@link Response}.
  */
 export function onClientResponse(handler: ResponseHandler): void {
   _onClientResponse = handler;
@@ -503,7 +628,7 @@ export function onClientResponse(handler: ResponseHandler): void {
  * Runs on a cache miss after the origin responds, before the response is
  * stored in cache and passed to the client-response phase.
  *
- * @param handler - Function that receives and may mutate the {@link HttpResponse}.
+ * @param handler - Function that receives and may mutate the {@link Response}.
  */
 export function onOriginResponse(handler: ResponseHandler): void {
   _onOriginResponse = handler;
@@ -519,6 +644,12 @@ function encodeBodyText(text: string | null): Uint8Array | null {
 function decodeBodyText(body: Uint8Array | null): string | null {
   if (body === null) return null;
   return String.UTF8.decode(body.buffer);
+}
+
+// Copy a body into a fresh ArrayBuffer (used by Request/Response arrayBuffer()).
+function bodyArrayBuffer(body: Uint8Array | null): ArrayBuffer | null {
+  if (body === null) return null;
+  return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength);
 }
 
 // ASCII-only lowercase — header names are always ASCII.
@@ -541,7 +672,7 @@ function asciiLower(s: string): string {
   return s;
 }
 
-// Shared header-set logic used by both HttpRequest.setHeader and HttpResponse.setHeader.
+// Shared header-set logic backing Headers.set on a live request/response.
 function headerSet(name: string, value: string): void {
   const nameBuf = String.UTF8.encode(asciiLower(name));
   const valBuf = String.UTF8.encode(value);
@@ -552,7 +683,7 @@ function headerSet(name: string, value: string): void {
   if (rc === 4) throw new Error("setHeader: header value too large (max 65536 bytes)");
 }
 
-// Shared header-append logic used by both HttpRequest.appendHeader and HttpResponse.appendHeader.
+// Shared header-append logic backing Headers.append on a live request/response.
 function headerAppend(name: string, value: string): void {
   const nameBuf = String.UTF8.encode(asciiLower(name));
   const valBuf = String.UTF8.encode(value);
@@ -563,11 +694,13 @@ function headerAppend(name: string, value: string): void {
   if (rc === 4) throw new Error("appendHeader: header value too large (max 65536 bytes)");
 }
 
-// Set a header on the response builder used by `responseSend`.
-function responseHeaderSet(name: string, value: string): void {
+// Append a header on the response builder used by `responseSend`. Appending
+// each entry of an already-assembled header set preserves duplicates such as
+// Set-Cookie.
+function responseHeaderAppend(name: string, value: string): void {
   const nameBuf = String.UTF8.encode(asciiLower(name));
   const valBuf = String.UTF8.encode(value);
-  const rc = _response_header_set(changetype<i32>(nameBuf), nameBuf.byteLength, changetype<i32>(valBuf), valBuf.byteLength);
+  const rc = _response_header_append(changetype<i32>(nameBuf), nameBuf.byteLength, changetype<i32>(valBuf), valBuf.byteLength);
   if (rc === 1) throw new Error("respond: invalid header name '" + name + "'");
   if (rc === 2) throw new Error("respond: invalid header value for '" + name + "'");
   if (rc === 3) throw new Error("respond: header name too large (max 1024 bytes)");
@@ -575,7 +708,7 @@ function responseHeaderSet(name: string, value: string): void {
 }
 
 // Commit the response builder. Status + body are last-write-wins across
-// repeated calls; accumulated `responseHeaderSet` calls persist.
+// repeated calls; accumulated `responseHeaderAppend` calls persist.
 function responseSend(status: u16, body: Uint8Array | null): void {
   const rc = _response_respond(
     <i32>status,
@@ -589,10 +722,10 @@ function responseSend(status: u16, body: Uint8Array | null): void {
 
 // --- Wire encode/decode (used by ABI layer in index.ts and by fetch below) ---
 
-export function packRequest(req: HttpRequest): ArrayBuffer { return req.pack(); }
-export function unpackRequest(base: usize, len: usize): HttpRequest { return HttpRequest.unpack(base, len); }
-export function packResponse(resp: HttpResponse): ArrayBuffer { return resp.pack(); }
-export function unpackResponse(base: usize, len: usize): HttpResponse { return HttpResponse.unpack(base, len); }
+export function packRequest(req: Request): ArrayBuffer { return req.pack(); }
+export function unpackRequest(base: usize, len: usize): Request { return Request.unpack(base, len); }
+export function packResponse(resp: Response): ArrayBuffer { return resp.pack(); }
+export function unpackResponse(base: usize, len: usize): Response { return Response.unpack(base, len); }
 
 function packFetchRequest(method: string, url: string, headers: string[][]): ArrayBuffer {
   const w = new MsgpackWriter();
@@ -603,9 +736,23 @@ function packFetchRequest(method: string, url: string, headers: string[][]): Arr
   return w.toArrayBuffer();
 }
 
-function unpackFetchResponse(base: usize, len: usize): HttpResponse { return HttpResponse.unpackFetch(base, len); }
+function unpackFetchResponse(base: usize, len: usize): Response { return Response.unpackFetch(base, len); }
 
 // --- fetch (host call) ---
+
+/**
+ * Options for an outbound {@link fetch}. Mirrors the subset of the WHATWG
+ * `RequestInit` dictionary we support. As an options bag with no constructor,
+ * it can be written as an object literal: `{ method: "POST", headers: h }`.
+ */
+export class RequestInit {
+  /** HTTP method. Defaults to `"GET"`. */
+  method: string = "GET";
+  /** Request headers, or `null` for none. */
+  headers: Headers | null = null;
+  /** Request body bytes, or `null` for no body. */
+  body: Uint8Array | null = null;
+}
 
 // @ts-ignore — @external is an AS-only decorator; TypeScript does not allow decorators on declare function
 @external("env", "fetch")
@@ -614,30 +761,34 @@ declare function hostFetch(meta_ptr: i32, meta_len: i32, body_ptr: i32, body_len
 /**
  * Make an outbound HTTP request from the guest. Synchronous from the guest's
  * perspective — the host suspends execution while its async fetch runs.
+ * Modelled on WHATWG `fetch(url, init)`, but it returns a {@link Response}
+ * directly rather than a `Promise` (AssemblyScript has no async).
  *
  * **Only available in the client-request phase.** Calling it from any other
- * phase returns an {@link HttpResponse} with {@link HttpResponse.errorKind}
+ * phase returns a {@link Response} with {@link Response.errorKind}
  * set to `"phase_not_allowed"`.
  *
  * Errors are surfaced via fields, not exceptions. Always check
- * {@link HttpResponse.isError} before reading the response body.
+ * {@link Response.isError} before reading the response body.
  *
  * Host-enforced limits: 2 s end-to-end timeout · 10 MiB request body ·
  * 10 MiB response body · per-worker concurrency cap (FIFO queue).
  *
  * @param url - Fully-qualified URL to request.
- * @param method - HTTP method. Defaults to `"GET"`.
- * @param headers - Request headers as `[name, value]` pairs.
- * @param body - Request body bytes, or `null` for no body.
- * @returns An {@link HttpResponse}. On transport failure `status` is `0` and
- *   {@link HttpResponse.errorKind} / {@link HttpResponse.errorMessage} are set.
+ * @param init - Method, headers, and body. Defaults to a `GET` with no body.
+ * @returns A {@link Response}. On transport failure `status` is `0` and
+ *   {@link Response.errorKind} / {@link Response.errorMessage} are set.
  */
-export function fetch(
-  url: string,
-  method: string = "GET",
-  headers: string[][] = [],
-  body: Uint8Array | null = null,
-): HttpResponse {
+export function fetch(url: string, init: RequestInit | null = null): Response {
+  let method = "GET";
+  let headers: string[][] = [];
+  let body: Uint8Array | null = null;
+  if (init !== null) {
+    method = init.method;
+    body = init.body;
+    const h = init.headers;
+    if (h !== null) headers = h.entries();
+  }
   const metaBuf = packFetchRequest(method, url, headers);
 
   const packed = hostFetch(

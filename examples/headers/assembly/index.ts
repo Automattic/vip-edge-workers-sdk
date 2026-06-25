@@ -5,13 +5,13 @@
 // Cache-Control we set here governs what the host stores for subsequent
 // requests — regardless of what headers origin sent.
 
-import { HttpResponse, onOriginResponse } from "@automattic/vip-edge-workers-sdk";
+import { Response, onOriginResponse } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
   on_origin_response,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
-onOriginResponse((resp: HttpResponse): void => {
+onOriginResponse((resp: Response): void => {
   resp.setCacheControl("max-age=10");
 });

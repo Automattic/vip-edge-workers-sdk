@@ -1,6 +1,9 @@
 export {
-  HttpRequest,
-  HttpResponse,
+  Headers,
+  Request,
+  Response,
+  RequestInit,
+  ResponseInit,
   RequestHandler,
   ResponseHandler,
   fetch,

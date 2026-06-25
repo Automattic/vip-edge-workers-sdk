@@ -8,7 +8,7 @@
 // is injected at deploy time and never appears in the WASM binary or on the wire.
 
 import {
-  HttpRequest, getenv, onClientRequest,
+  Request, getenv, onClientRequest,
   hmacSha256Str, secureCompare, hexEncode,
 } from "@automattic/vip-edge-workers-sdk";
 
@@ -18,14 +18,14 @@ export {
   client_request_body,    // buffer the request body so it's available for HMAC computation
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
-onClientRequest((req: HttpRequest): void => {
+onClientRequest((req: Request): void => {
   const secret = getenv("WEBHOOK_SECRET");
   if (secret === null) {
     req.respondText(500, "webhook secret not configured");
     return;
   }
 
-  const sig = req.getHeader("x-hub-signature-256");
+  const sig = req.headers.get("x-hub-signature-256");
   if (sig === null) {
     req.respondText(401, "missing x-hub-signature-256 header");
     return;

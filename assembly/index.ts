@@ -3,7 +3,7 @@
 // on_origin_response and reads the output struct written by writeOutputStruct.
 
 import {
-  HttpRequest, HttpResponse,
+  Headers, Request, Response, RequestInit, ResponseInit,
   RequestHandler, ResponseHandler,
   onClientRequest, onOriginRequest, onClientResponse, onOriginResponse,
   KV, RateLimit, fetch, getenv,
@@ -13,7 +13,7 @@ import {
 } from './api';
 
 export {
-  HttpRequest, HttpResponse,
+  Headers, Request, Response, RequestInit, ResponseInit,
   RequestHandler, ResponseHandler,
   onClientRequest, onOriginRequest, onClientResponse, onOriginResponse,
   KV, RateLimit, fetch, getenv,

@@ -26,15 +26,15 @@ export {
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req) => {
-  if (req.uri == "/healthz") {
+  if (req.url == "/healthz") {
     req.respondText(200, "ok");  // short-circuit: skip origin entirely
     return;
   }
-  req.setHeader("x-edge-worker", "true");
+  req.headers.set("x-edge-worker", "true");
 });
 
 onClientResponse((resp) => {
-  resp.setHeader("x-served-by", "edge");
+  resp.headers.set("x-served-by", "edge");
 });
 ```
 
@@ -56,13 +56,13 @@ Only re-export the ABI symbols for phases your worker handles. `alloc` is always
 ### Registration
 
 ```ts
-onClientRequest((req: HttpRequest) => void): void
-onOriginRequest((req: HttpRequest) => void): void
-onClientResponse((resp: HttpResponse) => void): void
-onOriginResponse((resp: HttpResponse) => void): void
+onClientRequest((req: Request) => void): void
+onOriginRequest((req: Request) => void): void
+onClientResponse((resp: Response) => void): void
+onOriginResponse((resp: Response) => void): void
 ```
 
-Mutate `req` / `resp` in place. In request phases, call `req.respond()` or `req.respondText()` to return an early response without hitting origin or cache.
+Mutate `req` / `resp` in place. In request phases, call `req.respondWith()` or `req.respondText()` to return an early response without hitting origin or cache.
 
 ---
 
@@ -95,22 +95,52 @@ The marker is a compile-time signal — its presence in the binary is what matte
 
 ---
 
-### `HttpRequest`
+### `Headers`
 
-`HttpRequest` is your view into the incoming HTTP request. You receive it as the argument to `onClientRequest` and `onOriginRequest` handlers. Read its method, URI, headers, and body; mutate it in place to change what the upstream or origin sees; or call `respondText()` to short-circuit the entire request with an immediate reply — skipping cache and origin entirely.
+`Headers` is a WHATWG-style view over a message's headers, exposed as `req.headers` and `resp.headers`. It mirrors the [browser `Headers`](https://developer.mozilla.org/en-US/docs/Web/API/Headers) interface, with two deliberate departures forced by AssemblyScript: it is **not iterable** (no `for…of` / spread — use `entries()` / `keys()` / `values()`, which return arrays), and the constructor accepts only `[name, value]` pairs (`new Headers([["accept", "text/plain"]])`). Header names are normalised to lowercase, per spec.
+
+Mutations on `req.headers` / `resp.headers` apply directly to the in-flight message. A standalone `new Headers(...)`, or the `headers` on a `fetch()` result, is backed by a local list.
+
+```ts
+onClientRequest((req) => {
+  const ua = req.headers.get("user-agent") || "unknown";  // string | null
+  req.headers.set("x-ua", ua);                             // replace all values
+  req.headers.append("x-tag", "a");                        // add without replacing
+  req.headers.delete("x-internal-token");
+  if (req.headers.has("authorization")) { /* … */ }
+});
+```
+
+| Method | Type | Notes |
+| --- | --- | --- |
+| `get(name)` | `string \| null` | Case-insensitive. On a local `Headers`, repeated values are joined with `", "`; on a live message, the host returns the first value |
+| `has(name)` | `bool` | Whether the header is present |
+| `set(name, value)` | `void` | Replaces **all** existing values for that name; throws on invalid name/value or size limit exceeded |
+| `append(name, value)` | `void` | Appends without removing existing values — use for `Set-Cookie`, `Cookie`, `Vary`, … |
+| `delete(name)` | `void` | Removes all values for that name; no-op if absent |
+| `getSetCookie()` | `string[]` | All `Set-Cookie` values, one per entry |
+| `entries()` | `string[][]` | All `[name, value]` pairs, order and duplicates preserved |
+| `keys()` | `string[]` | All header names, in order |
+| `values()` | `string[]` | All header values, in order |
+| `forEach(cb)` | `void` | Calls `cb(value, name, parent)` for each header |
+
+---
+
+### `Request`
+
+`Request` is your view into the incoming HTTP request. You receive it as the argument to `onClientRequest` and `onOriginRequest` handlers. Read its method, URL, headers, and body; mutate it in place to change what the upstream or origin sees; or call `respondWith()` / `respondText()` to short-circuit the entire request with an immediate reply — skipping cache and origin entirely.
 
 ```ts
 onClientRequest((req) => {
   // Header manipulation
-  const ua = req.getHeader("user-agent") || "unknown";
-  req.setHeader("x-ua", ua);
-  req.removeHeader("x-internal-token");
+  const ua = req.headers.get("user-agent") || "unknown";
+  req.headers.set("x-ua", ua);
+  req.headers.delete("x-internal-token");
 
   // Short-circuit with an early response
-  if (req.uri == "/robots.txt") {
-    req.respondText(200, "User-agent: *\nDisallow: /admin/", [
-      ["content-type", "text/plain"],
-    ]);
+  if (req.url == "/robots.txt") {
+    req.respondText(200, "User-agent: *\nDisallow: /admin/",
+      new Headers([["content-type", "text/plain"]]));
     return;
   }
 });
@@ -119,54 +149,60 @@ onClientRequest((req) => {
 | Field / method | Type | Notes |
 | --- | --- | --- |
 | `method` | `string` | HTTP method (`"GET"`, `"POST"`, …) |
-| `uri` | `string` | Path and query string |
+| `url` | `string` | Request target: path and query string. (Named `url` to match WHATWG; unlike a browser `Request` this is origin-relative, not absolute.) |
+| `headers` | `Headers` | Request headers; mutations apply to the in-flight request |
 | `body` | `Uint8Array \| null` | Raw request body; `null` if not buffered by the host |
-| `getHeader(name)` | `string \| null` | Case-insensitive lookup; first occurrence if duplicates exist |
-| `getHeaders()` | `string[][]` | All headers as `[name, value]` pairs, order and duplicates preserved; prefer `getHeader` for single lookups |
-| `setHeader(name, value)` | `void` | Replaces **all** existing values for that name; throws on invalid name/value or size limit exceeded |
-| `appendHeader(name, value)` | `void` | Appends a value without removing existing values — use for `Cookie` and other repeating headers |
-| `removeHeader(name)` | `void` | Removes all values for that name; no-op if absent |
 | `text()` | `string \| null` | UTF-8 decode of `body`; `null` if body is absent |
 | `bytes()` | `Uint8Array \| null` | Alias for `body` |
+| `arrayBuffer()` | `ArrayBuffer \| null` | Copy of `body` as an `ArrayBuffer`; `null` if absent |
 | `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
-| `respond(status, body?, headers?)` | `void` | Short-circuit with a raw-bytes body |
-| `respondText(status, body?, headers?)` | `void` | Short-circuit with a string body (UTF-8 encoded) |
+| `respondWith(response)` | `void` | Short-circuit with a `Response` (WHATWG `FetchEvent.respondWith` shape) |
+| `respondText(status, body?, headers?)` | `void` | Convenience: short-circuit with a string body (UTF-8 encoded). `headers` is a `Headers` or `null` |
 | `bypassChallenge()` | `void` | Signal host to skip bot-protection for this request |
 | `forceChallenge()` | `void` | Signal host to present a bot-protection challenge for this request, even if it would not otherwise be challenged |
 
+> **Note:** unlike the WHATWG `fetch` API, `req.text()` / `req.bytes()` / `req.arrayBuffer()` are **synchronous** — they return the value directly, not a `Promise`. AssemblyScript has no `async`/`await`.
+
 ---
 
-### `HttpResponse`
+### `Response`
 
-`HttpResponse` represents an HTTP response — whether it came from the cache, the origin, or one of your `fetch()` calls. You receive it in `onClientResponse` and `onOriginResponse` handlers, and as the return value from `fetch()`. Read its status and headers; mutate them to change what the client sees; call `setCacheControl()` to override how the host caches the response.
+`Response` represents an HTTP response — whether it came from the cache, the origin, or one of your `fetch()` calls. You receive it in `onClientResponse` and `onOriginResponse` handlers, and as the return value from `fetch()`. You can also construct one with `new Response(body, init)` to pass to `req.respondWith()`. Read its status and headers; mutate them to change what the client sees; call `setCacheControl()` to override how the host caches the response.
 
 ```ts
 onClientResponse((resp) => {
-  resp.setHeader("x-served-by", "edge");
+  resp.headers.set("x-served-by", "edge");
 
   if (resp.ok) {
     resp.setCacheControl("public, max-age=60");
   }
 });
+
+// Build one to short-circuit a request:
+req.respondWith(new Response(null, {
+  status: 302,
+  headers: new Headers([["location", "/elsewhere"]]),
+}));
 ```
 
 | Field / getter / method | Type | Notes |
 | --- | --- | --- |
-| `status` | `u16` | HTTP status code; `0` on `fetch()` transport error |
+| `new Response(body?, init?)` | — | `body` is `Uint8Array \| null`; `init` is `{ status?, statusText?, headers? }` |
+| `status` | `u16` | HTTP status code; `0` on `fetch()` transport error. Defaults to `200` for a constructed response |
+| `statusText` | `string` | Advisory only — not sent on the wire by this host |
 | `ok` | `bool` | `true` iff `status` is 200–299 |
+| `headers` | `Headers` | Response headers |
 | `body` | `Uint8Array \| null` | Raw body bytes; `null` if not buffered by the host |
-| `errorKind` | `string \| null` | Transport error type; only set on `HttpResponse` values returned by `fetch()`, always `null` in response-phase handlers |
+| `errorKind` | `string \| null` | Transport error type; only set on `Response` values returned by `fetch()`, always `null` in response-phase handlers |
 | `errorMessage` | `string \| null` | Human-readable detail when `errorKind` is set |
-| `getHeader(name)` | `string \| null` | Case-insensitive lookup; first occurrence if duplicates exist |
-| `getHeaders()` | `string[][]` | All headers as `[name, value]` pairs, order and duplicates preserved; prefer `getHeader` for single lookups |
-| `setHeader(name, value)` | `void` | Replaces **all** existing values for that name; throws on invalid name/value or size limit exceeded |
-| `appendHeader(name, value)` | `void` | Appends a value without removing existing values — use for `Set-Cookie`, `Vary`, and other repeating headers |
-| `removeHeader(name)` | `void` | Removes all values for that name; no-op if absent |
 | `text()` | `string \| null` | UTF-8 decode of `body`; `null` if body is absent |
 | `bytes()` | `Uint8Array \| null` | Alias for `body` |
+| `arrayBuffer()` | `ArrayBuffer \| null` | Copy of `body` as an `ArrayBuffer`; `null` if absent |
 | `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
 | `isError()` | `bool` | `true` iff `errorKind` is set |
 | `setCacheControl(value)` | `void` | Override the `Cache-Control` header for custom cache behaviour |
+
+> **Note:** as with `Request`, the body accessors are **synchronous** and there is no `Response.json()` — parse `text()` with a JSON library (see the [`json`](examples/json) example).
 
 ---
 
@@ -177,14 +213,14 @@ onClientResponse((resp) => {
 **Prefer this over manual body editing whenever you can.** Because the host rewrites the response as a stream, your worker never buffers the body into WASM memory: there's nothing to allocate, nothing to copy across the sandbox boundary, and **no response-size ceiling** — a multi-megabyte page rewrites the same way a small one does. Manual editing (export an `*_response_body` marker, then `text()` / `setBodyText()`) forces the host to buffer the entire body so it fits in linear memory, which is slower, costs memory proportional to the response, and is bounded by the host's buffered-body limit. Reach for the manual path only when you genuinely need to compute the change from the body's own content (something no declarative rule can express).
 
 ```ts
-import { onOriginResponse, HttpResponse, HtmlRules } from "@automattic/vip-edge-workers-sdk";
+import { onOriginResponse, Response, HtmlRules } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
   on_origin_response,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
-onOriginResponse((resp: HttpResponse): void => {
+onOriginResponse((resp: Response): void => {
   new HtmlRules()
     .prependInside("head", '<script src="/analytics.js" defer></script>')
     .setAttr("meta[name=robots]", "content", "noindex")
@@ -225,26 +261,28 @@ onOriginResponse((resp: HttpResponse): void => {
 
 ---
 
-### `fetch(url, method?, headers?, body?) → HttpResponse`
+### `fetch(url, init?) → Response`
 
-Make an outbound HTTP request from the worker. From your code's perspective it's a regular synchronous call — the host suspends the WASM instance while the request is in flight and resumes it with the response. Errors are surfaced via fields rather than exceptions, so always check `resp.isError()` before reading the body.
+Make an outbound HTTP request from the worker. Modelled on WHATWG [`fetch(url, init)`](https://developer.mozilla.org/en-US/docs/Web/API/fetch), but — because AssemblyScript has no `async` — it returns a `Response` **directly, not a `Promise`**. From your code's perspective it's a regular synchronous call: the host suspends the WASM instance while the request is in flight and resumes it with the response. Errors are surfaced via fields rather than a rejected promise, so always check `resp.isError()` before reading the body.
 
-**Available in the client-request phase only.** Calling it from any other phase returns an `HttpResponse` with `errorKind` set to `"phase_not_allowed"`.
+**Available in the client-request phase only.** Calling it from any other phase returns a `Response` with `errorKind` set to `"phase_not_allowed"`.
 
 ```ts
-import { fetch, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+import { fetch, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 onClientRequest((req) => {
-  if (!req.uri.startsWith("/ip")) return;
+  if (!req.url.startsWith("/ip")) return;
 
-  const resp = fetch("https://ifconfig.me/ip", "GET", [["accept", "text/plain"]]);
+  const resp = fetch("https://ifconfig.me/ip", {
+    headers: new Headers([["accept", "text/plain"]]),
+  });
 
   if (resp.isError()) {
     req.respondText(502, "fetch failed: " + resp.errorKind!);
     return;
   }
 
-  req.respondText(resp.status, resp.text(), [["content-type", "text/plain"]]);
+  req.respondText(resp.status, resp.text(), new Headers([["content-type", "text/plain"]]));
 });
 ```
 
@@ -252,19 +290,19 @@ To send a request body:
 
 ```ts
 const body = Uint8Array.wrap(String.UTF8.encode('{"key":"value"}'));
-const resp = fetch(
-  "https://api.example.com/v1/data",
-  "POST",
-  [["content-type", "application/json"]],
+const resp = fetch("https://api.example.com/v1/data", {
+  method: "POST",
+  headers: new Headers([["content-type", "application/json"]]),
   body,
-);
+});
 ```
 
-| Param | Type | Default |
+`init` is a `RequestInit` — an options bag you can pass as an object literal:
+
+| `init` field | Type | Default |
 | --- | --- | --- |
-| `url` | `string` | required |
 | `method` | `string` | `"GET"` |
-| `headers` | `string[][]` | `[]` |
+| `headers` | `Headers \| null` | `null` |
 | `body` | `Uint8Array \| null` | `null` |
 
 `errorKind` values: `timeout`, `too_many_inflight`, `request_too_large`, `response_too_large`, `body_read`, `transport`, `phase_not_allowed`.
@@ -288,13 +326,13 @@ import { KV, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 // PUT reads req.text() — export client_request_body to have the host buffer it.
 onClientRequest((req) => {
-  if (req.method == "PUT" && req.uri == "/note") {
+  if (req.method == "PUT" && req.url == "/note") {
     KV.setText("note", req.text() || "");
     req.respondText(200, "stored");
     return;
   }
 
-  if (req.method == "GET" && req.uri == "/note") {
+  if (req.method == "GET" && req.url == "/note") {
     const note = KV.getText("note");
     req.respondText(note !== null ? 200 : 404, note || "no note stored");
     return;
@@ -317,7 +355,7 @@ Atomic 64-bit integers. Absent counters read as `0` and are created on first wri
 ```ts
 onClientRequest((req) => {
   const visits = KV.incr("visits");  // atomic +1, returns new value
-  req.setHeader("x-visit-count", visits.toString());
+  req.headers.set("x-visit-count", visits.toString());
 });
 ```
 
@@ -339,10 +377,10 @@ onClientRequest((req) => {
 import { RateLimit, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 onClientRequest((req) => {
-  if (!req.uri.startsWith("/api/")) return;
+  if (!req.url.startsWith("/api/")) return;
 
   RateLimit.register("api", 50);
-  const ip = req.getHeader("x-forwarded-for") || "";
+  const ip = req.headers.get("x-forwarded-for") || "";
   if (!RateLimit.check("api", ip)) {
     req.respondText(429, "rate limited");
     return;
@@ -355,13 +393,13 @@ onClientRequest((req) => {
 | `register` | `(name: string, rps: i32) → void` | Idempotent. Throws if name > 64 B, `rps` ≤ 0, or site-wide limiter quota (1000) exceeded |
 | `check` | `(name: string, key: string) → bool` | `true` = allowed, `false` = rate-limited. Throws if limiter not registered |
 
-**Choosing the key:** each unique key gets its own token bucket. Key on something an attacker cannot enumerate freely — client IP, authenticated user ID, a normalised path prefix. Never use `req.uri` directly; arbitrary query strings create unlimited unique buckets and defeat the limit.
+**Choosing the key:** each unique key gets its own token bucket. Key on something an attacker cannot enumerate freely — client IP, authenticated user ID, a normalised path prefix. Never use `req.url` directly; arbitrary query strings create unlimited unique buckets and defeat the limit.
 
 | Good | Bad |
 | --- | --- |
-| `req.getHeader("x-forwarded-for")` | `req.uri` — query strings make every request unique |
+| `req.headers.get("x-forwarded-for")` | `req.url` — query strings make every request unique |
 | Authenticated user ID | Any user-supplied header or body value |
-| `req.uri.split("?")[0]` — normalised path | `req.uri` with arbitrary query params |
+| `req.url.split("?")[0]` — normalised path | `req.url` with arbitrary query params |
 
 ---
 
@@ -374,7 +412,7 @@ import { getenv, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 onClientRequest((req) => {
   const key = getenv("API_KEY");
-  if (key !== null) req.setHeader("authorization", "Bearer " + key);
+  if (key !== null) req.headers.set("authorization", "Bearer " + key);
 });
 ```
 
@@ -400,7 +438,7 @@ onClientRequest((req) => {
   const secret = getenv("WEBHOOK_SECRET");
   if (secret === null) { req.respondText(500, "not configured"); return; }
 
-  const sig      = req.getHeader("x-hub-signature-256") || "";
+  const sig      = req.headers.get("x-hub-signature-256") || "";
   const expected = "sha256=" + hexEncode(hmacSha256Str(secret, req.text() || ""));
 
   const a = Uint8Array.wrap(String.UTF8.encode(sig));
@@ -415,7 +453,7 @@ onClientRequest((req) => {
 import { getenv, onClientRequest, jwtVerifyHs256 } from "@automattic/vip-edge-workers-sdk";
 
 onClientRequest((req) => {
-  const auth = req.getHeader("authorization") || "";
+  const auth = req.headers.get("authorization") || "";
   if (!auth.startsWith("Bearer ")) { req.respondText(401, "missing token"); return; }
 
   const claims = jwtVerifyHs256(auth.slice(7), getenv("JWT_SECRET") || "");
@@ -423,7 +461,7 @@ onClientRequest((req) => {
 
   // claims is the raw JSON payload — parse with json-as if you need specific fields,
   // or forward it to the origin as a header.
-  req.setHeader("x-jwt-claims", claims);
+  req.headers.set("x-jwt-claims", claims);
 });
 ```
 
@@ -465,9 +503,9 @@ class Summary {
 }
 
 onClientRequest((req) => {
-  if (!req.uri.startsWith("/todo/")) return;
+  if (!req.url.startsWith("/todo/")) return;
 
-  const resp = fetch("https://jsonplaceholder.typicode.com/todos/" + req.uri.slice(6));
+  const resp = fetch("https://jsonplaceholder.typicode.com/todos/" + req.url.slice(6));
   if (!resp.ok) { req.respondText(resp.status, "not found"); return; }
 
   const todo = JSON.parse<Todo>(resp.text()!);
@@ -539,6 +577,6 @@ Run `make examples` to build all of them.
 
 **Bodies are raw bytes** (`Uint8Array`). Use `text()` / `setBodyText()` for UTF-8 strings; `JSON.parse` (via json-as) for structured JSON; everything else (binary, compressed, …) is plain bytes.
 
-**Headers** — `setHeader` replaces all existing values for a name; `appendHeader` adds a value alongside existing ones (use for `Set-Cookie`, `Vary`, etc.); `getHeader` returns the first occurrence; `getHeaders()` returns all pairs in order. Header names are normalised to lowercase. Name limit: 1 KiB; value limit: 64 KiB — `setHeader` and `appendHeader` throw if either is exceeded.
+**Headers** — accessed via `req.headers` / `resp.headers`, a WHATWG-style [`Headers`](#headers) object. `set` replaces all existing values for a name; `append` adds a value alongside existing ones (use for `Set-Cookie`, `Vary`, etc.); `get` returns the value (joining duplicates with `", "` on a local `Headers`); `entries()` returns all pairs in order. Header names are normalised to lowercase. Name limit: 1 KiB; value limit: 64 KiB — `set` and `append` throw if either is exceeded.
 
 **Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a request. Each request starts from a clean heap with no state carried over from prior requests or other workers — full isolation is guaranteed.

@@ -6,17 +6,17 @@
 // GET /note  — return the stored note (404 if not set)
 // PUT /note  — store the request body as the note
 
-import { HttpRequest, onClientRequest, KV } from "@automattic/vip-edge-workers-sdk";
+import { Request, onClientRequest, KV } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
   on_client_request,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
-onClientRequest((req: HttpRequest): void => {
-  req.setHeader("x-visit-count", KV.incr("visits").toString());
+onClientRequest((req: Request): void => {
+  req.headers.set("x-visit-count", KV.incr("visits").toString());
 
-  if (req.uri != "/note") return;
+  if (req.url != "/note") return;
 
   if (req.method == "PUT") {
     const body = req.text();

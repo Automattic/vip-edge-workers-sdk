@@ -5,7 +5,7 @@
 // Anything else passes through to origin.
 
 import { JSON } from "json-as";
-import { HttpRequest, onClientRequest, fetch } from "@automattic/vip-edge-workers-sdk";
+import { Request, Headers, onClientRequest, fetch } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
@@ -27,10 +27,10 @@ class TodoSummary {
   done: bool = false;
 }
 
-onClientRequest((req: HttpRequest): void => {
-  if (!req.uri.startsWith("/todo/")) return;
+onClientRequest((req: Request): void => {
+  if (!req.url.startsWith("/todo/")) return;
 
-  const id = req.uri.slice(6); // strip "/todo/"
+  const id = req.url.slice(6); // strip "/todo/"
   const resp = fetch("https://jsonplaceholder.typicode.com/todos/" + id);
 
   if (resp.isError()) {
@@ -55,6 +55,6 @@ onClientRequest((req: HttpRequest): void => {
   req.respondText(
     200,
     JSON.stringify(summary),
-    [["content-type", "application/json"]],
+    new Headers([["content-type", "application/json"]]),
   );
 });
