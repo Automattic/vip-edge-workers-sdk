@@ -51,6 +51,48 @@ The host invokes the worker at up to four points per request:
 
 Only re-export the ABI symbols for phases your worker handles. `alloc` is always required. Re-export a body marker only when that phase needs the body buffered (see [Body access](#body-access)).
 
+## Phase isolation
+
+Each phase handler runs as an **isolated invocation**. The host marshals the request (or response) into your worker, runs the one handler, and marshals the result back out — then repeats, from a clean slate, for the next phase. Two consequences trip people up:
+
+**1. Module state does not survive between phases.** A module-level variable set in one handler is back at its initial value by the time the next phase runs. This is the single most common mistake — it looks correct and compiles cleanly, but the flag is always false:
+
+```ts
+// BROKEN — `tag` is not shared across phases; it resets before onClientResponse runs.
+let tag = false;
+onClientRequest((req) => { tag = req.url.includes("debug"); });
+onClientResponse((resp) => { if (tag) resp.headers.set("x-debug", "1"); }); // never fires
+```
+
+**2. Response handlers cannot see the request.** `onClientResponse` / `onOriginResponse` receive only a `Response` — there is no request URL, method, or request headers available in a response phase. If a response decision depends on the request, you cannot read the request there.
+
+### Sharing data across phases
+
+| You want to… | Do this |
+| --- | --- |
+| Carry a value between two **request** phases (`onClientRequest` → `onOriginRequest`) | Mutate the request itself — e.g. `req.headers.set("x-my-flag", "1")`. Request mutations are marshaled forward to the next request phase (this is also how you change what origin sees). |
+| Set a **response** based on the **request** | You can't bridge it with module state, and the response phase can't read the request. Handle it entirely in the request phase: short-circuit with `req.respondText()` / `req.respondWith()`. |
+| Share data across **requests** | Use [`KV`](#kv) — the only store that persists beyond a single request. |
+
+**Example — a response header conditioned on a request query string.** Because the response phase can't see the URL and state doesn't cross phases, do it all in the request phase and answer directly:
+
+```ts
+import { Request, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+export {
+  alloc,
+  on_client_request,
+} from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+onClientRequest((req: Request) => {
+  // req.url is "path?query"; the query is only visible in a request phase.
+  if (req.url.includes("?debug") || req.url.includes("&debug")) {
+    req.respondText(200, "debug", new Headers([["x-debug", "1"]]));
+  }
+  // No trigger → fall through untouched to cache/origin.
+});
+```
+
 ## API
 
 ### Registration
@@ -168,6 +210,8 @@ onClientRequest((req) => {
 ### `Response`
 
 `Response` represents an HTTP response — whether it came from the cache, the origin, or one of your `fetch()` calls. You receive it in `onClientResponse` and `onOriginResponse` handlers, and as the return value from `fetch()`. You can also construct one with `new Response(body, init)` to pass to `req.respondWith()`. Read its status and headers; mutate them to change what the client sees; call `setCacheControl()` to override how the host caches the response.
+
+A response handler has **no access to the originating request** — there is no URL, method, or request headers here, and module state set in a request phase does not carry over (see [Phase isolation](#phase-isolation)). If a response decision depends on the request, make it in a request phase instead.
 
 ```ts
 onClientResponse((resp) => {
@@ -579,4 +623,4 @@ Run `make examples` to build all of them.
 
 **Headers** — accessed via `req.headers` / `resp.headers`, a WHATWG-style [`Headers`](#headers) object. `set` replaces all existing values for a name; `append` adds a value alongside existing ones (use for `Set-Cookie`, `Vary`, etc.); `get` returns the value (joining duplicates with `", "` on a local `Headers`); `entries()` returns all pairs in order. Header names are normalised to lowercase. Name limit: 1 KiB; value limit: 64 KiB — `set` and `append` throw if either is exceeded.
 
-**Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a request. Each request starts from a clean heap with no state carried over from prior requests or other workers — full isolation is guaranteed.
+**Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a single phase invocation. Each phase invocation starts from a clean slate: no state is carried over from a prior phase, a prior request, or another worker — full isolation is guaranteed. Because nothing survives from one phase to the next, module-level variables **cannot** be used to pass data between phases — see [Phase isolation](#phase-isolation) for how to share data correctly.
