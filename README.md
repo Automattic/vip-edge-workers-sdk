@@ -51,6 +51,26 @@ The host invokes the worker at up to four points per request:
 
 Only re-export the ABI symbols for phases your worker handles. `alloc` is always required. Re-export a body marker only when that phase needs the body buffered (see [Body access](#body-access)).
 
+## Phase isolation
+
+Each phase handler runs as an **isolated invocation**. The host marshals the request (or response) into your worker, runs the one handler, and marshals the result back out — then repeats, from a clean slate, for the next phase. Two consequences trip people up:
+
+**1. Module state does not survive between phases.** A module-level variable set in one handler is back at its initial value by the time the next phase runs. This is the single most common mistake — it looks correct and compiles cleanly, but the flag is always false:
+
+```ts
+// BROKEN — `tag` is not shared across phases; it resets before onClientResponse runs.
+let tag = false;
+onClientRequest((req) => { tag = req.url.includes("debug"); });
+onClientResponse((resp) => { if (tag) resp.headers.set("x-debug", "1"); }); // never fires
+```
+
+### Sharing data across phases
+
+| You want to… | Do this |
+| --- | --- |
+| Carry a value between two **request** phases (`onClientRequest` → `onOriginRequest`) | Mutate the request itself — e.g. `req.headers.set("x-my-flag", "1")`. Request mutations are marshaled forward to the next request phase (this is also how you change what origin sees). |
+| Share data across **requests** | Use [`KV`](#kv) — the only store that persists beyond a single request. |
+
 ## API
 
 ### Registration
@@ -579,4 +599,4 @@ Run `make examples` to build all of them.
 
 **Headers** — accessed via `req.headers` / `resp.headers`, a WHATWG-style [`Headers`](#headers) object. `set` replaces all existing values for a name; `append` adds a value alongside existing ones (use for `Set-Cookie`, `Vary`, etc.); `get` returns the value (joining duplicates with `", "` on a local `Headers`); `entries()` returns all pairs in order. Header names are normalised to lowercase. Name limit: 1 KiB; value limit: 64 KiB — `set` and `append` throw if either is exceeded.
 
-**Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a request. Each request starts from a clean heap with no state carried over from prior requests or other workers — full isolation is guaranteed.
+**Memory model (`--runtime stub`).** The stub runtime is a bump allocator — no GC, memory is never freed within a single phase invocation. Each phase invocation starts from a clean slate: no state is carried over from a prior phase, a prior request, or another worker — full isolation is guaranteed. Because nothing survives from one phase to the next, module-level variables **cannot** be used to pass data between phases — see [Phase isolation](#phase-isolation) for how to share data correctly.
