@@ -64,34 +64,12 @@ onClientRequest((req) => { tag = req.url.includes("debug"); });
 onClientResponse((resp) => { if (tag) resp.headers.set("x-debug", "1"); }); // never fires
 ```
 
-**2. Response handlers cannot see the request.** `onClientResponse` / `onOriginResponse` receive only a `Response` — there is no request URL, method, or request headers available in a response phase. If a response decision depends on the request, you cannot read the request there.
-
 ### Sharing data across phases
 
 | You want to… | Do this |
 | --- | --- |
 | Carry a value between two **request** phases (`onClientRequest` → `onOriginRequest`) | Mutate the request itself — e.g. `req.headers.set("x-my-flag", "1")`. Request mutations are marshaled forward to the next request phase (this is also how you change what origin sees). |
-| Set a **response** based on the **request** | You can't bridge it with module state, and the response phase can't read the request. Handle it entirely in the request phase: short-circuit with `req.respondText()` / `req.respondWith()`. |
 | Share data across **requests** | Use [`KV`](#kv) — the only store that persists beyond a single request. |
-
-**Example — a response header conditioned on a request query string.** Because the response phase can't see the URL and state doesn't cross phases, do it all in the request phase and answer directly:
-
-```ts
-import { Request, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
-
-export {
-  alloc,
-  on_client_request,
-} from "@automattic/vip-edge-workers-sdk/assembly/index";
-
-onClientRequest((req: Request) => {
-  // req.url is "path?query"; the query is only visible in a request phase.
-  if (req.url.includes("?debug") || req.url.includes("&debug")) {
-    req.respondText(200, "debug", new Headers([["x-debug", "1"]]));
-  }
-  // No trigger → fall through untouched to cache/origin.
-});
-```
 
 ## API
 
@@ -210,8 +188,6 @@ onClientRequest((req) => {
 ### `Response`
 
 `Response` represents an HTTP response — whether it came from the cache, the origin, or one of your `fetch()` calls. You receive it in `onClientResponse` and `onOriginResponse` handlers, and as the return value from `fetch()`. You can also construct one with `new Response(body, init)` to pass to `req.respondWith()`. Read its status and headers; mutate them to change what the client sees; call `setCacheControl()` to override how the host caches the response.
-
-A response handler has **no access to the originating request** — there is no URL, method, or request headers here, and module state set in a request phase does not carry over (see [Phase isolation](#phase-isolation)). If a response decision depends on the request, make it in a request phase instead.
 
 ```ts
 onClientResponse((resp) => {
