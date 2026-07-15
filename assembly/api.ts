@@ -24,6 +24,51 @@ declare function _header_delete(name_ptr: i32, name_len: i32): i32;
 @external("header", "list")
 declare function _header_list(): i64;
 
+// --- Original-request host functions ---
+// Read-only snapshot of the request as it arrived on this socket, taken by
+// the host before the request-phase chain mutated anything. Only response
+// phases have a snapshot; every function returns -1 otherwise. There are
+// deliberately no setters — the request already went upstream, so the view
+// is immutable by construction.
+
+// @ts-ignore
+@external("request", "method")
+declare function _request_method(): i64;
+
+// @ts-ignore
+@external("request", "uri")
+declare function _request_uri(): i64;
+
+// @ts-ignore
+@external("request", "header_get")
+declare function _request_header_get(name_ptr: i32, name_len: i32): i64;
+
+// @ts-ignore
+@external("request", "header_list")
+declare function _request_header_list(): i64;
+
+// Decode a packed `(ptr << 32) | len` host return into a string, or `null`
+// when the host returned -1 (absent).
+function unpackHostString(packed: i64): string | null {
+  if (packed < 0) return null;
+  // @ts-ignore — i32() is an AS truncation cast; >>> is valid on i64 in AS
+  const ptr = i32(packed >>> 32);
+  // @ts-ignore
+  const len = i32(packed & 0xffffffff);
+  return String.UTF8.decodeUnsafe(ptr, len);
+}
+
+// Decode a packed host return holding a msgpack `[name, value]` pair array.
+function unpackHostPairs(packed: i64): string[][] {
+  if (packed < 0) return [];
+  // @ts-ignore — i32() is an AS truncation cast; >>> is valid on i64 in AS
+  const ptr = i32(packed >>> 32);
+  // @ts-ignore
+  const len = i32(packed & 0xffffffff);
+  const r = new MsgpackReader(<usize>ptr, <usize>len);
+  return r.readStrPairArray();
+}
+
 // --- Response builder host functions ---
 // `response.*` is a separate header map for the early/replacement response.
 // `header.*` mutates the in-flight request (request phases) or upstream
@@ -64,14 +109,18 @@ export function _resetResponseSent(): void { _responseSent = false; }
  * `Headers` bound to a live request/response proxies every operation to the
  * host's header map, so mutations take effect immediately on the in-flight
  * message. A standalone `Headers` (or one carried by a {@link fetch} result)
- * is backed by a local list.
+ * is backed by a local list. The `Headers` carried by the read-only request
+ * view ({@link Response.request}) reads from the host's request snapshot;
+ * mutating it throws, matching a WHATWG `Headers` with the `immutable` guard.
  */
 export class Headers {
   // _live === true: operations proxy to the host's header map for the current
-  // request/response phase. _live === false: operations use the local
-  // _entries list (fetch results, responses built with `new Response`, and
-  // standalone `new Headers`).
+  // request/response phase. _requestView === true: reads proxy to the host's
+  // immutable request snapshot (response phases); writes throw. Neither:
+  // operations use the local _entries list (fetch results, responses built
+  // with `new Response`, and standalone `new Headers`).
   private _live: bool = false;
+  private _requestView: bool = false;
   private _entries: string[][] = [];
 
   /**
@@ -95,6 +144,20 @@ export class Headers {
     return h;
   }
 
+  /** @internal Bind a read-only `Headers` to the host's request snapshot. */
+  static _bindRequestView(): Headers {
+    const h = new Headers();
+    h._requestView = true;
+    return h;
+  }
+
+  // Throws when this Headers is the read-only request-snapshot view.
+  private _assertMutable(op: string): void {
+    if (this._requestView) {
+      throw new Error(op + ": the request view is read-only in response phases");
+    }
+  }
+
   /** @internal Build a local `Headers` from already-lowercased pairs. */
   static _fromPairs(pairs: string[][]): Headers {
     const h = new Headers();
@@ -104,16 +167,8 @@ export class Headers {
 
   // All [name, value] pairs as a fresh array. Names are lowercase.
   private _list(): string[][] {
-    if (this._live) {
-      const packed = _header_list();
-      if (packed < 0) return [];
-      // @ts-ignore — i32() is an AS truncation cast; >>> is valid on i64 in AS
-      const ptr = i32(packed >>> 32);
-      // @ts-ignore
-      const len = i32(packed & 0xffffffff);
-      const r = new MsgpackReader(<usize>ptr, <usize>len);
-      return r.readStrPairArray();
-    }
+    if (this._requestView) return unpackHostPairs(_request_header_list());
+    if (this._live) return unpackHostPairs(_header_list());
     const out: string[][] = [];
     for (let i = 0; i < this._entries.length; i++) {
       out.push([this._entries[i][0], this._entries[i][1]]);
@@ -130,15 +185,15 @@ export class Headers {
    */
   get(name: string): string | null {
     const lower = asciiLower(name);
+    if (this._requestView) {
+      const nameBuf = String.UTF8.encode(lower);
+      return unpackHostString(
+        _request_header_get(changetype<i32>(nameBuf), nameBuf.byteLength),
+      );
+    }
     if (this._live) {
       const nameBuf = String.UTF8.encode(lower);
-      const packed = _header_get(changetype<i32>(nameBuf), nameBuf.byteLength);
-      if (packed < 0) return null;
-      // @ts-ignore
-      const ptr = i32(packed >>> 32);
-      // @ts-ignore
-      const len = i32(packed & 0xffffffff);
-      return String.UTF8.decodeUnsafe(ptr, len);
+      return unpackHostString(_header_get(changetype<i32>(nameBuf), nameBuf.byteLength));
     }
     let found: string | null = null;
     for (let i = 0; i < this._entries.length; i++) {
@@ -164,9 +219,11 @@ export class Headers {
    *
    * @param name - Header name (ASCII only, max 1 KiB).
    * @param value - Header value (max 64 KiB).
-   * @throws If the name or value is invalid or exceeds the host-enforced size limits.
+   * @throws If the name or value is invalid or exceeds the host-enforced size
+   *   limits, or if this `Headers` is the read-only request view.
    */
   set(name: string, value: string): void {
+    this._assertMutable("Headers.set");
     if (this._live) { headerSet(name, value); return; }
     const lower = asciiLower(name);
     const next: string[][] = [];
@@ -183,9 +240,11 @@ export class Headers {
    *
    * @param name - Header name (ASCII only, max 1 KiB).
    * @param value - Header value to append (max 64 KiB).
-   * @throws If the name or value is invalid or exceeds the host-enforced size limits.
+   * @throws If the name or value is invalid or exceeds the host-enforced size
+   *   limits, or if this `Headers` is the read-only request view.
    */
   append(name: string, value: string): void {
+    this._assertMutable("Headers.append");
     if (this._live) { headerAppend(name, value); return; }
     this._entries.push([asciiLower(name), value]);
   }
@@ -194,8 +253,10 @@ export class Headers {
    * Remove all values for `name` (case-insensitive). No-op if absent.
    *
    * @param name - Header name to remove.
+   * @throws If this `Headers` is the read-only request view.
    */
   delete(name: string): void {
+    this._assertMutable("Headers.delete");
     const lower = asciiLower(name);
     if (this._live) {
       const nameBuf = String.UTF8.encode(lower);
@@ -262,28 +323,76 @@ export class Headers {
 }
 
 /**
- * The inbound HTTP request in a request-phase handler.
+ * The inbound HTTP request.
  *
- * Mutate {@link method}, {@link url}, {@link headers}, or {@link body} in
- * place to change what origin sees, or call {@link respondWith} /
- * {@link respondText} to short-circuit the request and return a response to
- * the client without forwarding to origin.
+ * In request-phase handlers ({@link onClientRequest}, {@link onOriginRequest})
+ * this is the live, mutable request: change {@link method}, {@link url},
+ * {@link headers}, or {@link body} in place to alter what origin sees, or call
+ * {@link respondWith} / {@link respondText} to short-circuit the request and
+ * return a response to the client without forwarding to origin.
  *
- * Available in: {@link onClientRequest}, {@link onOriginRequest}.
+ * In response-phase handlers the same class appears as the **read-only view**
+ * returned by {@link Response.request}: the request as it arrived, before the
+ * request-phase chain mutated it. On that view every setter and mutating
+ * method throws, and {@link body} is always `null`.
  */
 export class Request {
+  private _method: string = "";
+  private _url: string = "";
+  private _body: Uint8Array | null = null;
+  // True on the view returned by `Response.request` — the request already
+  // went upstream, so mutations there would be lies; setters throw.
+  private _readonly: bool = false;
+
   /** HTTP method (e.g. `"GET"`, `"POST"`). */
-  method: string = "";
+  get method(): string {
+    return this._method;
+  }
+
+  set method(value: string) {
+    this._assertMutable("method");
+    this._method = value;
+  }
+
   /**
    * Request target: path and query string (e.g. `"/search?q=foo"`). Named
    * `url` to match the WHATWG `Request.url` property; note that, unlike a
    * browser `Request`, this is the origin-relative target, not an absolute URL.
    */
-  url: string = "";
+  get url(): string {
+    return this._url;
+  }
+
+  set url(value: string) {
+    this._assertMutable("url");
+    this._url = value;
+  }
+
   /** Request headers. Mutations apply to the in-flight request. */
   headers: Headers = new Headers();
-  /** Raw request body bytes, or `null` if the request has no body. */
-  body: Uint8Array | null = null;
+
+  /**
+   * Raw request body bytes, or `null` if the request has no body. Always
+   * `null` on the read-only view from {@link Response.request} — the host
+   * does not retain request bodies across the upstream round-trip.
+   */
+  get body(): Uint8Array | null {
+    return this._body;
+  }
+
+  set body(value: Uint8Array | null) {
+    this._assertMutable("body");
+    this._body = value;
+  }
+
+  // Throws when this Request is the read-only response-phase view.
+  private _assertMutable(what: string): void {
+    if (this._readonly) {
+      throw new Error(
+        "Request." + what + ": not available on the read-only request view in response phases",
+      );
+    }
+  }
 
   /**
    * Decode the request body as a UTF-8 string.
@@ -337,8 +446,11 @@ export class Request {
    * accumulated headers from prior calls persist.
    *
    * @param response - The response to send.
+   * @throws If called on the read-only view from {@link Response.request};
+   *   response phases replace the response by mutating it directly.
    */
   respondWith(response: Response): void {
+    this._assertMutable("respondWith");
     const entries = response.headers.entries();
     for (let i = 0; i < entries.length; i++) {
       responseHeaderAppend(entries[i][0], entries[i][1]);
@@ -354,8 +466,10 @@ export class Request {
    * @param status - HTTP status code (100–599).
    * @param body - Response body string. Defaults to no body.
    * @param headers - Response headers, or `null` for none.
+   * @throws If called on the read-only view from {@link Response.request}.
    */
   respondText(status: u16, body: string | null = null, headers: Headers | null = null): void {
+    this._assertMutable("respondText");
     if (headers !== null) {
       const entries = headers.entries();
       for (let i = 0; i < entries.length; i++) {
@@ -395,9 +509,26 @@ export class Request {
     const r = new MsgpackReader(base, len);
     const req = new Request();
     r.readArraySize(); // 2
-    req.method = r.readStr();
-    req.url = r.readStr();
+    req._method = r.readStr();
+    req._url = r.readStr();
     req.headers = Headers._bindLive();
+    return req;
+  }
+
+  /**
+   * @internal Build the read-only request view for response phases, backed
+   * by the host's `request.*` snapshot functions. Method and url come back
+   * empty when the host has no snapshot (never the case in response phases
+   * on a runtime that supports `request.*`).
+   */
+  static _bindResponseView(): Request {
+    const req = new Request();
+    const m = unpackHostString(_request_method());
+    const u = unpackHostString(_request_uri());
+    req._method = m === null ? "" : m;
+    req._url = u === null ? "" : u;
+    req.headers = Headers._bindRequestView();
+    req._readonly = true;
     return req;
   }
 }
@@ -429,6 +560,8 @@ export class ResponseInit {
  * the return value of {@link fetch}.
  */
 export class Response {
+  private _request: Request | null = null;
+
   /** HTTP status code. `0` on a transport-level error from {@link fetch}. */
   status: u16 = 200;
   /** HTTP status text. Advisory only — not provided by this host on the wire. */
@@ -471,6 +604,30 @@ export class Response {
       const h = init.headers;
       if (h !== null) this.headers = h;
     }
+  }
+
+  /**
+   * Read-only view of the request that produced this response: the request
+   * **as it arrived on this socket**, before the request-phase chain mutated
+   * it. Use it to decorate the response based on what the client originally
+   * asked for — the pre-rewrite URL, the original `Origin` header, and so on.
+   *
+   * Only meaningful in response-phase handlers ({@link onClientResponse},
+   * {@link onOriginResponse}); the host attaches no snapshot elsewhere and
+   * the fields come back empty. The view is immutable — setters and header
+   * writes throw — and {@link Request.body} is always `null` on it.
+   *
+   * Built lazily on first access. Workers that never read it pay nothing:
+   * the compiled module then has no `request.*` imports, and the host skips
+   * taking the snapshot entirely.
+   */
+  get request(): Request {
+    let v = this._request;
+    if (v === null) {
+      v = Request._bindResponseView();
+      this._request = v;
+    }
+    return v;
   }
 
   /**
