@@ -150,6 +150,8 @@ onClientRequest((req) => {
 
 `Request` is your view into the incoming HTTP request. You receive it as the argument to `onClientRequest` and `onOriginRequest` handlers. Read its method, URL, headers, and body; mutate it in place to change what the upstream or origin sees; or call `respondWith()` / `respondText()` to short-circuit the entire request with an immediate reply — skipping cache and origin entirely.
 
+The same class also appears in response phases as the **read-only view** returned by [`resp.request`](#resprequest--request-read-only): the request as it originally arrived, before your request-phase handlers mutated it. On that view all setters and mutating methods throw, and `body` is always `null`.
+
 ```ts
 onClientRequest((req) => {
   // Header manipulation
@@ -212,6 +214,7 @@ req.respondWith(new Response(null, {
 | `statusText` | `string` | Advisory only — not sent on the wire by this host |
 | `ok` | `bool` | `true` iff `status` is 200–299 |
 | `headers` | `Headers` | Response headers |
+| `request` | `Request` | Read-only view of the original request (response phases only; see below) |
 | `body` | `Uint8Array \| null` | Raw body bytes; `null` if not buffered by the host |
 | `errorKind` | `string \| null` | Transport error type; only set on `Response` values returned by `fetch()`, always `null` in response-phase handlers |
 | `errorMessage` | `string \| null` | Human-readable detail when `errorKind` is set |
@@ -223,6 +226,32 @@ req.respondWith(new Response(null, {
 | `setCacheControl(value)` | `void` | Override the `Cache-Control` header for custom cache behaviour |
 
 > **Note:** as with `Request`, the body accessors are **synchronous** and there is no `Response.json()` — parse `text()` with a JSON library (see the [`json`](examples/json) example).
+
+#### `resp.request` → `Request` (read-only)
+
+Response-phase handlers run after the request has already gone upstream, so `resp.headers` is the *response* header map. To decide anything based on what the client asked for, use `resp.request`: a **read-only snapshot of the request as it arrived**, taken by the host before any request-phase handler mutated it.
+
+```ts
+onClientResponse((resp) => {
+  const req = resp.request;                    // original request, pre-mutation
+
+  if (req.method == "POST") {
+    resp.setCacheControl("no-store");          // never cache POST responses
+  }
+
+  const origin = req.headers.get("origin");
+  if (origin !== null && origin.endsWith(".example.com")) {
+    resp.headers.set("access-control-allow-origin", origin);
+  }
+});
+```
+
+Semantics worth knowing:
+
+- **Original, not as-sent-upstream.** If a request-phase handler rewrote `req.url` or a header, `resp.request` still shows the pre-rewrite values. In `onOriginResponse` the snapshot is the request as it reached the origin socket (which already includes client-phase mutations that went through the cache path).
+- **Immutable.** Setters, `respondWith`/`respondText`, and header writes throw. To change the response, mutate `resp` directly.
+- **`body` is always `null`** — the host does not retain request bodies across the upstream round-trip.
+- **Free unless used.** The view is built lazily, and a worker that never touches `resp.request` compiles with no `request.*` imports at all — the host then skips taking the snapshot entirely. (Requires a runtime with `request.*` host-function support; deploy the runtime before workers that use this.)
 
 ---
 
@@ -585,7 +614,7 @@ Working examples under [`examples/`](examples):
 | [`html-rewrite`](examples/html-rewrite) | Declarative HTML rewriting with `HtmlRules` — anonymize outbound links via href.li |
 | [`redirect`](examples/redirect) | 301 redirects — rename a path prefix and strip trailing slashes |
 | [`rewrite`](examples/rewrite) | Internal rewrite — repoint host + URI before cache lookup, no client-visible redirect |
-| [`headers`](examples/headers) | Override `Cache-Control` on the origin response |
+| [`headers`](examples/headers) | Override `Cache-Control` on the origin response + tag `.pdf` responses using the `resp.request` view |
 | [`webhook`](examples/webhook) | HMAC-SHA256 webhook signature verification (GitHub style) |
 | [`udger`](examples/udger) | Device/crawler detection via the Udger Cloud Parser API + `getenv` secret |
 
