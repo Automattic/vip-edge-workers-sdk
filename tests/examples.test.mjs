@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -8,6 +8,10 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const asc = resolve(repoRoot, 'node_modules/.bin/asc');
+const exampleNames = [
+  'fetch', 'headers', 'html-rewrite', 'json', 'kv',
+  'rate-limit', 'redirect', 'rewrite', 'udger', 'webhook',
+];
 
 function compileExample(name) {
   const tempRoot = mkdtempSync(join(tmpdir(), `vip-edge-workers-${name}-`));
@@ -73,16 +77,42 @@ test('Udger example rejects both user-agent and IP crawlers', () => {
 
 test('example lockfiles record the current SDK version', () => {
   const { version } = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
-  const examples = [
-    'fetch', 'headers', 'html-rewrite', 'json', 'kv',
-    'rate-limit', 'redirect', 'rewrite', 'udger', 'webhook',
-  ];
 
-  for (const name of examples) {
+  for (const name of exampleNames) {
     const lock = JSON.parse(readFileSync(
       resolve(repoRoot, `examples/${name}/package-lock.json`),
       'utf8',
     ));
     assert.equal(lock.packages['../..'].version, version, `${name} lockfile is stale`);
+  }
+});
+
+test('sync script updates example lockfiles to the root package version', () => {
+  const lockfile = resolve(repoRoot, 'examples/fetch/package-lock.json');
+  const originals = new Map(exampleNames.map((name) => {
+    const path = resolve(repoRoot, `examples/${name}/package-lock.json`);
+    return [path, readFileSync(path, 'utf8')];
+  }));
+
+  try {
+    const lock = JSON.parse(originals.get(lockfile));
+    lock.packages['../..'].version = '0.0.0';
+    writeFileSync(lockfile, `${JSON.stringify(lock, null, 2)}\n`);
+
+    const result = spawnSync('node', [
+      resolve(repoRoot, 'scripts/sync-example-lockfile-versions.mjs'),
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+
+    const synced = JSON.parse(readFileSync(lockfile, 'utf8'));
+    const { version } = JSON.parse(readFileSync(resolve(repoRoot, 'package.json'), 'utf8'));
+    assert.equal(synced.packages['../..'].version, version);
+  } finally {
+    for (const [path, original] of originals) {
+      writeFileSync(path, original);
+    }
   }
 });
