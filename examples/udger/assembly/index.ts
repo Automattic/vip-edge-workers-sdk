@@ -70,8 +70,9 @@ onClientRequest((req: Request): void => {
 
   const info = JSON.parse<UdgerInfo>(body);
   const agent = info.user_agent;
+  const address = info.ip_address;
 
-  if (agent.ua_class == "Crawler") {
+  if (agent.ua_class == "Crawler" || address.ip_classification == "Crawler") {
     req.respondText(403, "crawlers not allowed", new Headers([["content-type", "text/plain"]]));
     return;
   }

@@ -150,7 +150,7 @@ onClientRequest((req) => {
 
 `Request` is your view into the incoming HTTP request. You receive it as the argument to `onClientRequest` and `onOriginRequest` handlers. Read its method, URL, headers, and body; mutate it in place to change what the upstream or origin sees; or call `respondWith()` / `respondText()` to short-circuit the entire request with an immediate reply — skipping cache and origin entirely.
 
-The same class also appears in response phases as the **read-only view** returned by [`resp.request`](#resprequest--request-read-only): the request as it originally arrived, before your request-phase handlers mutated it. On that view all setters and mutating methods throw, and `body` is always `null`.
+The same class also appears in response phases as the **read-only view** returned by [`resp.request`](#resprequest--request-read-only): the request as it arrived at the socket corresponding to that response phase, before that socket's request handlers mutated it. On that view all setters and mutating methods throw, and `body` is always `null`.
 
 ```ts
 onClientRequest((req) => {
@@ -214,7 +214,7 @@ req.respondWith(new Response(null, {
 | `statusText` | `string` | Advisory only — not sent on the wire by this host |
 | `ok` | `bool` | `true` iff `status` is 200–299 |
 | `headers` | `Headers` | Response headers |
-| `request` | `Request` | Read-only view of the original request (response phases only; see below) |
+| `request` | `Request` | Read-only, phase-specific request snapshot (response phases only; see below) |
 | `body` | `Uint8Array \| null` | Raw body bytes; `null` if not buffered by the host |
 | `errorKind` | `string \| null` | Transport error type; only set on `Response` values returned by `fetch()`, always `null` in response-phase handlers |
 | `errorMessage` | `string \| null` | Human-readable detail when `errorKind` is set |
@@ -229,11 +229,11 @@ req.respondWith(new Response(null, {
 
 #### `resp.request` → `Request` (read-only)
 
-Response-phase handlers run after the request has already gone upstream, so `resp.headers` is the *response* header map. To decide anything based on what the client asked for, use `resp.request`: a **read-only snapshot of the request as it arrived**, taken by the host before any request-phase handler mutated it.
+Response-phase handlers run after the request has already gone upstream, so `resp.headers` is the *response* header map. To inspect the corresponding request, use `resp.request`: a **read-only snapshot taken at that response phase's socket boundary**, before the request handlers for that socket mutated it.
 
 ```ts
 onClientResponse((resp) => {
-  const req = resp.request;                    // original request, pre-mutation
+  const req = resp.request;                    // client-socket request, pre-client-handler
 
   if (req.method == "POST") {
     resp.setCacheControl("no-store");          // never cache POST responses
@@ -248,7 +248,8 @@ onClientResponse((resp) => {
 
 Semantics worth knowing:
 
-- **Original, not as-sent-upstream.** If a request-phase handler rewrote `req.url` or a header, `resp.request` still shows the pre-rewrite values. In `onOriginResponse` the snapshot is the request as it reached the origin socket (which already includes client-phase mutations that went through the cache path).
+- **`onClientResponse`: client-socket snapshot.** It shows the request as the client-facing socket received it, before `onClientRequest` handlers rewrote the URL, method, or headers.
+- **`onOriginResponse`: origin-socket snapshot.** It shows the request as it reached the origin-facing socket, after client-phase/cache-path mutations but before `onOriginRequest` handlers mutated it.
 - **Immutable.** Setters, `respondWith`/`respondText`, and header writes throw. To change the response, mutate `resp` directly.
 - **`body` is always `null`** — the host does not retain request bodies across the upstream round-trip.
 - **Free unless used.** The view is built lazily, and a worker that never touches `resp.request` compiles with no `request.*` imports at all — the host then skips taking the snapshot entirely. (Requires a runtime with `request.*` host-function support; deploy the runtime before workers that use this.)
@@ -364,7 +365,7 @@ Host-enforced limits: 2 s end-to-end timeout · 10 MiB request body · 10 MiB re
 
 `KV` is a shared, host-backed key-value store. Unlike in-memory variables in your worker code — which are wiped at the end of every request because the WASM instance is discarded — `KV` persists data across requests and is shared across all instances running on the same site. It's useful for counters, feature flags, small configuration blobs, or any value that needs to outlive a single request.
 
-The store has two distinct modes. **Bytes** holds arbitrary values up to 10 KiB. **Counters** hold atomic 64-bit integers — useful for visit counts, quotas, or any value you need to increment safely under concurrent load. A key can only hold one type at a time; mixing them throws.
+The store has two distinct modes. **Bytes** holds arbitrary values up to 10 KiB. **Counters** hold atomic 64-bit integers — useful for visit counts, quotas, or any value you need to increment safely under concurrent load. A key holds one type at a time. Counter accessors throw when a key holds bytes; byte reads treat a counter key as absent; and `set` / `setText` replace a counter with a bytes value.
 
 Keys: max 64 bytes (UTF-8). Values: max 10 KiB. Entries are subject to site-wide LRU eviction; evicted counters reset to `0` on next access.
 
@@ -392,10 +393,10 @@ onClientRequest((req) => {
 | Method | Signature | Notes |
 | --- | --- | --- |
 | `get` | `(key: string) → Uint8Array \| null` | `null` = absent or counter key; zero-length = key exists with empty value |
-| `set` | `(key: string, value: Uint8Array) → void` | Throws if key > 64 B or value > 10 KiB |
+| `set` | `(key: string, value: Uint8Array) → void` | Replaces a counter key with bytes; throws if key > 64 B or value > 10 KiB |
 | `del` | `(key: string) → void` | No-op if absent; works on both types |
 | `getText` | `(key: string) → string \| null` | `get` + UTF-8 decode |
-| `setText` | `(key: string, value: string) → void` | UTF-8 encode + `set` |
+| `setText` | `(key: string, value: string) → void` | UTF-8 encode + `set`, including counter-to-bytes replacement |
 
 **Counter store**
 
@@ -455,6 +456,8 @@ onClientRequest((req) => {
 ### `getenv(name) → string | null`
 
 Look up a host-provided environment variable. Variables are read-only and set at worker startup. Returns `null` if not set.
+
+Environment values are injected at runtime rather than embedded in the worker source or compiled binary. After `getenv()` returns, however, the value is an ordinary string: worker code can put it in a request, response, or log. Never place secrets in URLs or query strings; send them to trusted services in a header or body only when the integration requires it.
 
 ```ts
 import { getenv, onClientRequest } from "@automattic/vip-edge-workers-sdk";
@@ -525,7 +528,7 @@ onClientRequest((req) => {
 
 `jwtVerifyHs256` validates `alg: "HS256"` strictly — RS256 / ES256 tokens return `null`. `exp` is checked against wall clock; `nbf` and `iat` are not enforced.
 
-Secrets should come from `getenv()` — injected at deploy time, never visible in the binary or on the wire.
+Secrets should come from `getenv()` so they are injected at deploy time instead of embedded in the binary. Treat the returned string as sensitive: this prevents build-time disclosure, but it does not stop worker code from transmitting the value.
 
 ---
 
@@ -535,7 +538,7 @@ The SDK does not include a JSON library. Workers that need to parse structured J
 
 ```ts
 import { JSON } from "json-as";
-import { fetch, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+import { fetch, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 @json
 class Todo {
@@ -564,7 +567,11 @@ onClientRequest((req) => {
   out.title = todo.title;
   out.done = todo.completed;
 
-  req.respondText(200, JSON.stringify(out), [["content-type", "application/json"]]);
+  req.respondText(
+    200,
+    JSON.stringify(out),
+    new Headers([["content-type", "application/json"]]),
+  );
 });
 ```
 

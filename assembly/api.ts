@@ -24,10 +24,10 @@ declare function _header_delete(name_ptr: i32, name_len: i32): i32;
 @external("header", "list")
 declare function _header_list(): i64;
 
-// --- Original-request host functions ---
-// Read-only snapshot of the request as it arrived on this socket, taken by
-// the host before the request-phase chain mutated anything. Only response
-// phases have a snapshot; every function returns -1 otherwise. There are
+// --- Request-snapshot host functions ---
+// Read-only snapshot of the request as it arrived on the socket corresponding
+// to this phase, taken before that socket's request handlers mutated it. Only
+// response phases have a snapshot; every function returns -1 otherwise. There are
 // deliberately no setters — the request already went upstream, so the view
 // is immutable by construction.
 
@@ -99,6 +99,54 @@ export function _isResponseSent(): bool { return _responseSent; }
 export function _resetResponseSent(): void { _responseSent = false; }
 
 // --- Public types ---
+
+function isHeaderNameChar(code: i32): bool {
+  if ((code >= 48 && code <= 57)
+      || (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)) return true;
+
+  return code == 33  // !
+    || code == 35    // #
+    || code == 36    // $
+    || code == 37    // %
+    || code == 38    // &
+    || code == 39    // '
+    || code == 42    // *
+    || code == 43    // +
+    || code == 45    // -
+    || code == 46    // .
+    || code == 94    // ^
+    || code == 95    // _
+    || code == 96    // `
+    || code == 124   // |
+    || code == 126;  // ~
+}
+
+function validateLocalHeader(name: string, value: string, op: string): void {
+  const nameBytes = String.UTF8.encode(name).byteLength;
+  if (nameBytes > 1024) {
+    throw new Error(op + ": header name too large (max 1024 bytes)");
+  }
+  if (name.length == 0) {
+    throw new Error(op + ": invalid header name");
+  }
+  for (let i = 0; i < name.length; i++) {
+    if (!isHeaderNameChar(name.charCodeAt(i))) {
+      throw new Error(op + ": invalid header name '" + name + "'");
+    }
+  }
+
+  const valueBytes = String.UTF8.encode(value).byteLength;
+  if (valueBytes > 65536) {
+    throw new Error(op + ": header value too large (max 65536 bytes)");
+  }
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if ((code < 32 && code != 9) || code == 127) {
+      throw new Error(op + ": invalid header value for '" + name + "'");
+    }
+  }
+}
 
 /**
  * A WHATWG-style view over a set of HTTP headers, as exposed by
@@ -225,6 +273,7 @@ export class Headers {
   set(name: string, value: string): void {
     this._assertMutable("Headers.set");
     if (this._live) { headerSet(name, value); return; }
+    validateLocalHeader(name, value, "Headers.set");
     const lower = asciiLower(name);
     const next: string[][] = [];
     for (let i = 0; i < this._entries.length; i++) {
@@ -246,6 +295,7 @@ export class Headers {
   append(name: string, value: string): void {
     this._assertMutable("Headers.append");
     if (this._live) { headerAppend(name, value); return; }
+    validateLocalHeader(name, value, "Headers.append");
     this._entries.push([asciiLower(name), value]);
   }
 
@@ -332,9 +382,10 @@ export class Headers {
  * return a response to the client without forwarding to origin.
  *
  * In response-phase handlers the same class appears as the **read-only view**
- * returned by {@link Response.request}: the request as it arrived, before the
- * request-phase chain mutated it. On that view every setter and mutating
- * method throws, and {@link body} is always `null`.
+ * returned by {@link Response.request}: the request as it arrived at the
+ * socket corresponding to that response phase, before that socket's request
+ * handlers mutated it. On that view every setter and mutating method throws,
+ * and {@link body} is always `null`.
  */
 export class Request {
   private _method: string = "";
@@ -608,9 +659,11 @@ export class Response {
 
   /**
    * Read-only view of the request that produced this response: the request
-   * **as it arrived on this socket**, before the request-phase chain mutated
-   * it. Use it to decorate the response based on what the client originally
-   * asked for — the pre-rewrite URL, the original `Origin` header, and so on.
+   * **as it arrived on the socket corresponding to this response phase**,
+   * before that socket's request handlers mutated it. In `onClientResponse`
+   * this is the client-socket request before client-request handlers. In
+   * `onOriginResponse` it is the origin-socket request after client-phase
+   * mutations but before origin-request handlers.
    *
    * Only meaningful in response-phase handlers ({@link onClientResponse},
    * {@link onOriginResponse}); the host attaches no snapshot elsewhere and
@@ -800,7 +853,7 @@ function encodeBodyText(text: string | null): Uint8Array | null {
 
 function decodeBodyText(body: Uint8Array | null): string | null {
   if (body === null) return null;
-  return String.UTF8.decode(body.buffer);
+  return String.UTF8.decodeUnsafe(body.dataStart, body.byteLength);
 }
 
 // Copy a body into a fresh ArrayBuffer (used by Request/Response arrayBuffer()).
@@ -1045,6 +1098,7 @@ export namespace KV {
 
   /**
    * Store a bytes value under `key`.
+   * If the key currently holds a counter, it is replaced with this bytes value.
    *
    * @param key - Key (max 64 bytes UTF-8).
    * @param value - Value to store (max 10 KiB).

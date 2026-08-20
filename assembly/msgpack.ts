@@ -2,8 +2,8 @@
 // Only the types required by the SDK schemas are implemented.
 //
 // Wire protocol uses array encoding (positional fields, no names on the wire):
-//   Request  (host→guest, guest→host): [method: str, uri: str,  headers: [[name, value], …]]
-//   Response (host→guest, guest→host): [status: u16, headers: [[name, value], …]]
+//   Request  (host→guest, guest→host): [method: str, uri: str]
+//   Response (host→guest, guest→host): [status: u16]
 //   FetchReq (guest→host):             [method: str, url: str,   headers: [[name, value], …]]
 //   FetchRes (host→guest):             [status: u16, headers: [[name, value], …], error_kind: str|nil, error_message: str|nil]
 
@@ -76,7 +76,7 @@ export class MsgpackWriter {
 
   writeStr(s: string): void {
     const byteLen = utf8ByteLength(s);
-    const prefixLen: i32 = byteLen <= 31 ? 1 : byteLen <= 0xff ? 2 : 3;
+    const prefixLen: i32 = byteLen <= 31 ? 1 : byteLen <= 0xff ? 2 : byteLen <= 0xffff ? 3 : 5;
     this.reserve(prefixLen + byteLen);
     const p = this.p();
     if (byteLen <= 31) {
@@ -87,13 +87,24 @@ export class MsgpackWriter {
       store<u8>(p,     0xd9);
       // @ts-ignore
       store<u8>(p + 1, <u8>byteLen);
-    } else {
+    } else if (byteLen <= 0xffff) {
       // @ts-ignore
       store<u8>(p,     0xda);
       // @ts-ignore
       store<u8>(p + 1, <u8>(byteLen >>> 8));
       // @ts-ignore
       store<u8>(p + 2, <u8>(byteLen & 0xff));
+    } else {
+      // @ts-ignore
+      store<u8>(p,     0xdb);
+      // @ts-ignore
+      store<u8>(p + 1, <u8>(byteLen >>> 24));
+      // @ts-ignore
+      store<u8>(p + 2, <u8>(byteLen >>> 16));
+      // @ts-ignore
+      store<u8>(p + 3, <u8>(byteLen >>> 8));
+      // @ts-ignore
+      store<u8>(p + 4, <u8>(byteLen & 0xff));
     }
     // @ts-ignore — encodeUnsafe writes UTF-8 bytes directly into the buffer; no allocation
     String.UTF8.encodeUnsafe(changetype<usize>(s), s.length, p + <usize>prefixLen);
@@ -177,6 +188,11 @@ export class MsgpackReader {
       len = <i32>this.b();
     } else if (b == 0xda) {
       len = (<i32>this.b() << 8) | <i32>this.b();
+    } else if (b == 0xdb) {
+      len = (<i32>this.b() << 24)
+        | (<i32>this.b() << 16)
+        | (<i32>this.b() << 8)
+        | <i32>this.b();
     }
     const s = String.UTF8.decodeUnsafe(this.pos, <usize>len);
     this.pos += <usize>len;

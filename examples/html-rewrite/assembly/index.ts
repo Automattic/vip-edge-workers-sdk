@@ -25,5 +25,6 @@ onOriginResponse((_resp: Response): void => {
     // Capture the protocol so it's preserved in the wrapped URL. Only
     // touches absolute http(s) links — relative hrefs are left alone.
     .rewriteAttrRe("a[href]", "href", "^(https?://)", "https://href.li/?$1")
+    .setAttr("a[href]", "rel", "noreferrer noopener")
     .install();
 });

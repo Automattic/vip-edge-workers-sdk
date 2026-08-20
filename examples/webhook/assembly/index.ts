@@ -4,8 +4,9 @@
 // Requests with a missing or invalid signature are rejected with 401; valid
 // requests pass through to origin unchanged.
 //
-// The HMAC secret is read from the WEBHOOK_SECRET environment variable, which
-// is injected at deploy time and never appears in the WASM binary or on the wire.
+// The HMAC secret is read from the WEBHOOK_SECRET environment variable, so it
+// is injected at deploy time instead of embedded in the WASM binary. This
+// worker uses it only to compute the expected signature and does not transmit it.
 
 import {
   Request, getenv, onClientRequest,
