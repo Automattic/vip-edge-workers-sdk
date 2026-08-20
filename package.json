@@ -1,0 +1,46 @@
+{
+  "name": "@automattic/vip-edge-workers-sdk",
+  "version": "0.3.1",
+  "description": "AssemblyScript SDK for VIP edge-workers",
+  "ascMain": "assembly/index.ts",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.ts"
+    },
+    "./assembly/index": {
+      "types": "./assembly/index.d.ts",
+      "default": "./assembly/index.ts"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "assembly/index": [
+        "assembly/index.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "assembly",
+    "examples/*/assembly",
+    "examples/*/build.mjs",
+    "examples/*/package-lock.json",
+    "examples/*/package.json",
+    "index.d.ts",
+    "index.ts",
+    "Makefile",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {},
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.0",
+    "typedoc": "^0.26.11"
+  }
+}
