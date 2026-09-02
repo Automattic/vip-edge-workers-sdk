@@ -20,7 +20,8 @@ export {
 };
 
 export {
-  hmacSha256, hmacSha256Str, sha256, secureCompare, jwtVerifyHs256, hexEncode,
+  hmacSha256, hmacSha256Str, sha256, secureCompare, jwtVerifyHs256,
+  getRandomValues, hexEncode,
 } from './crypto';
 
 export { HtmlRules } from './html';

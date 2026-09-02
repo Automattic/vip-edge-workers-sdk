@@ -18,7 +18,12 @@ declare function _constant_time_eq(aPtr: i32, aLen: i32, bPtr: i32, bLen: i32): 
 @external("crypto", "jwt_verify_hs256")
 declare function _jwt_verify_hs256(tokenPtr: i32, tokenLen: i32, secretPtr: i32, secretLen: i32): i64;
 
+// @ts-ignore
+@external("crypto", "get_random_values")
+declare function _get_random_values(ptr: i32, len: i32): i32;
+
 const DIGEST_SIZE = 32;
+const MAX_RANDOM_BYTES = 65536;
 
 /**
  * Compute HMAC-SHA256 of `message` with `key`.
@@ -95,6 +100,26 @@ export function jwtVerifyHs256(token: string, secret: string): string | null {
   // @ts-ignore
   const len = i32(packed & 0xffffffff);
   return String.UTF8.decodeUnsafe(ptr, len);
+}
+
+/**
+ * Fill `array` with cryptographically secure random bytes from the host's
+ * OS entropy source. Use this for tokens, nonces, and keys; `Math.random()`
+ * is a plain PRNG and must not be used for anything security-sensitive.
+ *
+ * Mirrors Web Crypto's `crypto.getRandomValues`, including its per-call
+ * quota: requests larger than 64 KiB throw and leave `array` untouched.
+ *
+ * @returns The same `array`, now filled.
+ */
+export function getRandomValues(array: Uint8Array): Uint8Array {
+  if (array.byteLength > MAX_RANDOM_BYTES) {
+    throw new RangeError("getRandomValues: at most 65536 bytes per call");
+  }
+  if (_get_random_values(<i32>array.dataStart, array.byteLength) !== 0) {
+    throw new Error("getRandomValues: host refused the request");
+  }
+  return array;
 }
 
 /**
