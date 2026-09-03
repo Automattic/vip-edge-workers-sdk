@@ -19,6 +19,7 @@ export {
   sha256,
   secureCompare,
   jwtVerifyHs256,
+  getRandomValues,
   hexEncode,
   HtmlRules,
 } from "./assembly/index";

@@ -90,6 +90,7 @@ export function hmacSha256Str(key: string, message: string): Uint8Array;
 export function sha256(message: Uint8Array): Uint8Array;
 export function secureCompare(a: Uint8Array, b: Uint8Array): boolean;
 export function jwtVerifyHs256(token: string, secret: string): string | null;
+export function getRandomValues(array: Uint8Array): Uint8Array;
 export function hexEncode(bytes: Uint8Array): string;
 
 export class HtmlRules {

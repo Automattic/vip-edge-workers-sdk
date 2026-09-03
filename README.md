@@ -524,7 +524,21 @@ onClientRequest((req) => {
 | `sha256` | `(msg: Uint8Array) → Uint8Array` | 32-byte SHA-256 digest |
 | `secureCompare` | `(a: Uint8Array, b: Uint8Array) → bool` | Timing-attack-safe comparison; execution time depends only on input length, not content |
 | `jwtVerifyHs256` | `(token: string, secret: string) → string \| null` | Verifies alg, signature, and `exp`; returns claims JSON or `null` |
+| `getRandomValues` | `(array: Uint8Array) → Uint8Array` | Fills `array` with OS-sourced secure random bytes; at most 64 KiB per call |
 | `hexEncode` | `(bytes: Uint8Array) → string` | Lowercase hex string (two characters per byte) |
+
+**Secure random bytes**
+
+```ts
+import { getRandomValues, hexEncode, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+onClientRequest((req) => {
+  const nonce = hexEncode(getRandomValues(new Uint8Array(16)));
+  req.headers.set("x-request-nonce", nonce);
+});
+```
+
+`getRandomValues` mirrors Web Crypto: it fills the array in place from the host's OS entropy source and throws if asked for more than 64 KiB at once. `Math.random()` also works in workers, but it is an ordinary PRNG whose output can be predicted from a few observed values, so never use it for tokens, nonces, session IDs, or keys.
 
 `jwtVerifyHs256` validates `alg: "HS256"` strictly — RS256 / ES256 tokens return `null`. `exp` is checked against wall clock; `nbf` and `iat` are not enforced.
 
