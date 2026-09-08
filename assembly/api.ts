@@ -1233,13 +1233,13 @@ export namespace RateLimit {
    * with HTTP 429.
    *
    * **Choose the key carefully.** Each unique key value gets its own token
-   * bucket, so a key that an attacker can enumerate freely (e.g. `req.uri`
+   * bucket, so a key that an attacker can enumerate freely (e.g. `req.url`
    * with arbitrary query strings, or any user-supplied value) lets them
    * create unlimited buckets and bypass the limit entirely. Good keys are
    * things an attacker cannot cheaply vary: client IP
-   * (`req.getHeader("x-forwarded-for")`), authenticated user ID, or a
+   * (`req.headers.get("x-forwarded-for")`), authenticated user ID, or a
    * normalised path prefix with the query string stripped
-   * (`req.uri.split("?")[0]`).
+   * (`req.url.split("?")[0]`).
    *
    * @param name - Limiter name (must have been passed to {@link register}).
    * @param key - Per-request bucket key.
