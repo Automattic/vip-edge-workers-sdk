@@ -22,4 +22,8 @@ export {
   getRandomValues,
   hexEncode,
   HtmlRules,
+  URLSearchParams,
+  Cookies,
+  formDecode,
+  formEncode,
 } from "./assembly/index";

@@ -1,6 +1,7 @@
 // Public SDK types, host function bindings, and wire encode/decode helpers.
 
 import { MsgpackWriter, MsgpackReader } from './msgpack';
+import { URLSearchParams, Cookies } from './url';
 
 // --- Header host functions ---
 
@@ -394,6 +395,9 @@ export class Request {
   // True on the view returned by `Response.request` — the request already
   // went upstream, so mutations there would be lies; setters throw.
   private _readonly: bool = false;
+  private _queryParams: RequestQueryParams | null = null;
+  private _cookies: Cookies | null = null;
+  private _cookieHeader: string | null = null;
 
   /** HTTP method (e.g. `"GET"`, `"POST"`). */
   get method(): string {
@@ -417,6 +421,64 @@ export class Request {
   set url(value: string) {
     this._assertMutable("url");
     this._url = value;
+    this._queryParams = null;
+  }
+
+  /** Path component of {@link url}, without the query string (e.g. `"/search"`). */
+  get path(): string {
+    const q = this._url.indexOf("?");
+    return q < 0 ? this._url : this._url.slice(0, q);
+  }
+
+  /** Replace the path, keeping the current query string. */
+  set path(value: string) {
+    this.url = joinUrl(value, this.query);
+  }
+
+  /** Query string of {@link url} without the leading `?` (e.g. `"q=foo"`), or `""` when there is none. */
+  get query(): string {
+    const q = this._url.indexOf("?");
+    return q < 0 ? "" : this._url.slice(q + 1);
+  }
+
+  /** Replace the query string. A leading `?` is optional; `""` removes it. */
+  set query(value: string) {
+    const bare = value.length > 0 && value.charCodeAt(0) == 63 ? value.slice(1) : value;
+    this.url = joinUrl(this.path, bare);
+  }
+
+  /**
+   * Parsed query parameters. Parsed once and cached until {@link url} is
+   * reassigned. Mutating the returned object rewrites {@link url}, so
+   * `req.queryParams.delete("utm_source")` changes the request target.
+   */
+  get queryParams(): URLSearchParams {
+    let params = this._queryParams;
+    if (params === null) {
+      params = new RequestQueryParams(this, this.query);
+      this._queryParams = params;
+    }
+    return params;
+  }
+
+  /** @internal Write-back path for RequestQueryParams; bypasses the cache reset. */
+  _syncQuery(params: URLSearchParams): void {
+    this._assertMutable("queryParams");
+    this._url = joinUrl(this.path, params.toString());
+  }
+
+  /**
+   * Cookies sent by the client, parsed from the `Cookie` header. The parse is
+   * cached and reused as long as the header value is unchanged.
+   */
+  get cookies(): Cookies {
+    const raw = this.headers.get("cookie");
+    const cached = this._cookies;
+    if (cached !== null && this._cookieHeader == raw) return cached;
+    const cookies = new Cookies(raw);
+    this._cookies = cookies;
+    this._cookieHeader = raw;
+    return cookies;
   }
 
   /** Request headers. Mutations apply to the in-flight request. */
@@ -531,6 +593,19 @@ export class Request {
   }
 
   /**
+   * Convenience: short-circuit the request with a redirect to `location`.
+   * Equivalent to `respondWith(Response.redirect(location, status))`.
+   *
+   * @param location - Value for the `Location` header.
+   * @param status - Redirect status code. Defaults to `302`.
+   * @throws If `status` is not a redirect status, or if called on the
+   *   read-only view from {@link Response.request}.
+   */
+  respondRedirect(location: string, status: u16 = 302): void {
+    this.respondWith(Response.redirect(location, status));
+  }
+
+  /**
    * Instruct the host to skip bot-protection and security challenge handling
    * for this request.
    */
@@ -581,6 +656,23 @@ export class Request {
     req.headers = Headers._bindRequestView();
     req._readonly = true;
     return req;
+  }
+}
+
+function joinUrl(path: string, query: string): string {
+  return query.length == 0 ? path : path + "?" + query;
+}
+
+class RequestQueryParams extends URLSearchParams {
+  private _owner: Request;
+
+  constructor(owner: Request, query: string) {
+    super(query);
+    this._owner = owner;
+  }
+
+  protected _changed(): void {
+    this._owner._syncQuery(this);
   }
 }
 
@@ -655,6 +747,24 @@ export class Response {
       const h = init.headers;
       if (h !== null) this.headers = h;
     }
+  }
+
+  /**
+   * Build a redirect response, mirroring WHATWG `Response.redirect(url, status)`.
+   *
+   * @param location - Value for the `Location` header.
+   * @param status - One of `301`, `302`, `303`, `307`, `308`. Defaults to `302`.
+   * @throws If `status` is not a redirect status.
+   */
+  static redirect(location: string, status: u16 = 302): Response {
+    if (status != 301 && status != 302 && status != 303 && status != 307 && status != 308) {
+      throw new Error("Response.redirect: invalid redirect status " + status.toString());
+    }
+    return new Response(null, {
+      status: status,
+      statusText: "",
+      headers: new Headers([["location", location]]),
+    });
   }
 
   /**

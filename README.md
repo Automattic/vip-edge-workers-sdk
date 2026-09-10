@@ -159,8 +159,16 @@ onClientRequest((req) => {
   req.headers.set("x-ua", ua);
   req.headers.delete("x-internal-token");
 
+  // URL helpers: path, query parameters (parsed once, cached), cookies
+  if (req.path == "/search" && req.queryParams.get("q") === null) {
+    req.respondText(400, "missing q");
+    return;
+  }
+  req.queryParams.delete("utm_source");          // rewrites req.url
+  const variant = req.cookies.get("ab-variant");  // string | null
+
   // Short-circuit with an early response
-  if (req.url == "/robots.txt") {
+  if (req.path == "/robots.txt") {
     req.respondText(200, "User-agent: *\nDisallow: /admin/",
       new Headers([["content-type", "text/plain"]]));
     return;
@@ -172,6 +180,10 @@ onClientRequest((req) => {
 | --- | --- | --- |
 | `method` | `string` | HTTP method (`"GET"`, `"POST"`, …) |
 | `url` | `string` | Request target: path and query string. (Named `url` to match WHATWG; unlike a browser `Request` this is origin-relative, not absolute.) |
+| `path` | `string` | Path part of `url`, without the query string. Assigning it keeps the current query string |
+| `query` | `string` | Query string without the leading `?` (e.g. `"q=foo"`), or `""` if none. Assigning it replaces the query (leading `?` optional, `""` removes it) |
+| `queryParams` | `URLSearchParams` | Parsed query parameters, parsed once and cached until `url` is reassigned. Mutations write back to `url`. See [`URLSearchParams`](#urlsearchparams) |
+| `cookies` | `Cookies` | Parsed `Cookie` header, cached while the header value is unchanged. See [`Cookies`](#cookies) |
 | `headers` | `Headers` | Request headers; mutations apply to the in-flight request |
 | `body` | `Uint8Array \| null` | Raw request body; `null` if not buffered by the host |
 | `text()` | `string \| null` | UTF-8 decode of `body`; `null` if body is absent |
@@ -180,6 +192,7 @@ onClientRequest((req) => {
 | `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
 | `respondWith(response)` | `void` | Short-circuit with a `Response` (WHATWG `FetchEvent.respondWith` shape) |
 | `respondText(status, body?, headers?)` | `void` | Convenience: short-circuit with a string body (UTF-8 encoded). `headers` is a `Headers` or `null` |
+| `respondRedirect(location, status?)` | `void` | Convenience: short-circuit with a redirect to `location`. `status` defaults to `302`; must be 301/302/303/307/308 |
 | `bypassChallenge()` | `void` | Signal host to skip bot-protection for this request |
 | `forceChallenge()` | `void` | Signal host to present a bot-protection challenge for this request, even if it would not otherwise be challenged |
 
@@ -205,11 +218,14 @@ req.respondWith(new Response(null, {
   status: 302,
   headers: new Headers([["location", "/elsewhere"]]),
 }));
+// …or the shorthand:
+req.respondWith(Response.redirect("/elsewhere"));
 ```
 
 | Field / getter / method | Type | Notes |
 | --- | --- | --- |
 | `new Response(body?, init?)` | — | `body` is `Uint8Array \| null`; `init` is `{ status?, statusText?, headers? }` |
+| `Response.redirect(location, status?)` | `Response` | Static. Empty-body response with a `Location` header. `status` defaults to `302`; throws unless 301/302/303/307/308 |
 | `status` | `u16` | HTTP status code; `0` on `fetch()` transport error. Defaults to `200` for a constructed response |
 | `statusText` | `string` | Advisory only — not sent on the wire by this host |
 | `ok` | `bool` | `true` iff `status` is 200–299 |
@@ -253,6 +269,71 @@ Semantics worth knowing:
 - **Immutable.** Setters, `respondWith`/`respondText`, and header writes throw. To change the response, mutate `resp` directly.
 - **`body` is always `null`** — the host does not retain request bodies across the upstream round-trip.
 - **Free unless used.** The view is built lazily, and a worker that never touches `resp.request` compiles with no `request.*` imports at all — the host then skips taking the snapshot entirely. (Requires a runtime with `request.*` host-function support; deploy the runtime before workers that use this.)
+
+---
+
+### `URLSearchParams`
+
+`URLSearchParams` is an ordered multimap of query parameters, modelled on the [browser class](https://developer.mozilla.org/en-US/docs/Web/API/URLSearchParams) with the usual AssemblyScript departures: not iterable (`keys()` / `values()` / `entries()` return arrays) and constructed only from a string. Names and values are stored decoded (`+` and `%XX` handled as `application/x-www-form-urlencoded`); `toString()` re-encodes them.
+
+`req.queryParams` is the common way to get one. It is parsed on first access and cached until `req.url` is reassigned, so repeated `get()` calls don't re-parse. Mutating it rewrites `req.url` — handy for stripping tracking parameters or normalising query order before the cache lookup. Standalone construction is useful for form bodies and for building `fetch()` URLs:
+
+```ts
+onClientRequest((req) => {
+  const page = req.queryParams.get("page") || "1";
+  req.queryParams.delete("fbclid");
+  req.queryParams.sort();                       // canonical order → better cache hit rate
+
+  const form = new URLSearchParams(req.text());  // POST body, application/x-www-form-urlencoded
+  const email = form.get("email");
+
+  const q = new URLSearchParams();
+  q.set("q", "café & more");                     // encoded as q=caf%C3%A9+%26+more
+  fetch("https://api.example.com/search?" + q.toString());
+});
+```
+
+| Member | Type | Notes |
+| --- | --- | --- |
+| `new URLSearchParams(init?)` | — | Parses a query string (leading `?` ignored) or form body; `null` / omitted for empty |
+| `size` | `i32` | Number of parameters, duplicates included |
+| `get(name)` | `string \| null` | First value, or `null` if absent. An empty value (`?flag` or `?flag=`) is `""` |
+| `getAll(name)` | `string[]` | Every value for `name`, in order |
+| `has(name)` | `bool` | Whether `name` is present |
+| `set(name, value)` | `void` | Replace all values for `name` with one; keeps the first occurrence's position |
+| `append(name, value)` | `void` | Add a pair without removing existing ones |
+| `delete(name)` | `void` | Remove every `name` |
+| `sort()` | `void` | Stable sort by name |
+| `keys()` / `values()` / `entries()` | arrays | In order, duplicates included |
+| `forEach(cb)` | `void` | Calls `cb(value, name, parent)` for each pair |
+| `toString()` | `string` | `a=1&b=2`, no leading `?`; `""` when empty |
+
+`formEncode(s)` / `formDecode(s)` — the encoder and decoder used above — are exported too, for one-off use.
+
+---
+
+### `Cookies`
+
+`Cookies` is a read-only view over a `Cookie` request header. Values come back verbatim (RFC 6265 defines no encoding, so none is applied); names are case-sensitive; when a name repeats, the first occurrence wins (clients send the most-specific path first). Get one from `req.cookies` — parsed on first access and reused while the header value is unchanged — or parse a header yourself with `new Cookies(value)`.
+
+```ts
+onClientRequest((req) => {
+  const session = req.cookies.get("session");   // string | null
+  if (session === null && req.path.startsWith("/account/")) {
+    req.respondRedirect("/login");
+  }
+});
+```
+
+| Member | Type | Notes |
+| --- | --- | --- |
+| `new Cookies(header?)` | — | Parses a `Cookie` header value such as `"a=1; b=2"`; `null` / omitted for empty |
+| `size` | `i32` | Number of distinct names |
+| `get(name)` | `string \| null` | Value, or `null` if absent |
+| `has(name)` | `bool` | Whether `name` is present |
+| `keys()` / `entries()` | arrays | Names, or `[name, value]` pairs, in header order |
+
+To *set* cookies on a response, use `resp.headers.append("set-cookie", …)`; to read the ones a response sets, `resp.headers.getSetCookie()`.
 
 ---
 
@@ -449,7 +530,7 @@ onClientRequest((req) => {
 | --- | --- |
 | `req.headers.get("x-forwarded-for")` | `req.url` — query strings make every request unique |
 | Authenticated user ID | Any user-supplied header or body value |
-| `req.url.split("?")[0]` — normalised path | `req.url` with arbitrary query params |
+| `req.path` — path without the query string | `req.url` with arbitrary query params |
 
 ---
 
