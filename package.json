@@ -1,7 +1,11 @@
 {
   "name": "@automattic/vip-edge-workers-sdk",
-  "version": "0.5.0",
+  "version": "0.4.0",
   "description": "AssemblyScript SDK for VIP edge-workers",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Automattic/vip-edge-workers-sdk.git"
+  },
   "ascMain": "assembly/index.ts",
   "types": "index.d.ts",
   "exports": {
@@ -33,6 +37,8 @@
     "README.md"
   ],
   "scripts": {
+    "sync-example-lockfile-versions": "node scripts/sync-example-lockfile-versions.mjs",
+    "version": "npm run sync-example-lockfile-versions",
     "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {},
