@@ -111,3 +111,23 @@ test('published package includes its example build surface', () => {
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('published package declares its GitHub repository', () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'vip-edge-workers-package-'));
+
+  try {
+    const { details: { filename } } = packPackage(tempRoot);
+    const manifest = JSON.parse(run('tar', [
+      '-xOf',
+      join(tempRoot, filename),
+      'package/package.json',
+    ]));
+
+    assert.deepEqual(manifest.repository, {
+      type: 'git',
+      url: 'git+https://github.com/Automattic/vip-edge-workers-sdk.git',
+    });
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
