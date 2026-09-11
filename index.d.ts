@@ -14,9 +14,42 @@ export class Headers {
   forEach(callback: (value: string, key: string, parent: Headers) => void): void;
 }
 
+export class URLSearchParams {
+  constructor(init?: string | null);
+  readonly size: number;
+  get(name: string): string | null;
+  getAll(name: string): string[];
+  has(name: string): boolean;
+  set(name: string, value: string): void;
+  append(name: string, value: string): void;
+  delete(name: string): void;
+  sort(): void;
+  keys(): string[];
+  values(): string[];
+  entries(): string[][];
+  forEach(callback: (value: string, key: string, parent: URLSearchParams) => void): void;
+  toString(): string;
+}
+
+export class Cookies {
+  constructor(header?: string | null);
+  readonly size: number;
+  get(name: string): string | null;
+  has(name: string): boolean;
+  keys(): string[];
+  entries(): string[][];
+}
+
+export function formDecode(s: string): string;
+export function formEncode(s: string): string;
+
 export class Request {
   method: string;
   url: string;
+  path: string;
+  query: string;
+  readonly queryParams: URLSearchParams;
+  readonly cookies: Cookies;
   headers: Headers;
   body: Uint8Array | null;
   text(): string | null;
@@ -25,6 +58,7 @@ export class Request {
   setBodyText(text: string | null): void;
   respondWith(response: Response): void;
   respondText(status: number, body?: string | null, headers?: Headers | null): void;
+  respondRedirect(location: string, status?: number): void;
   bypassChallenge(): void;
   forceChallenge(): void;
 }
@@ -37,6 +71,7 @@ export interface ResponseInit {
 
 export class Response {
   constructor(body?: Uint8Array | null, init?: ResponseInit | null);
+  static redirect(location: string, status?: number): Response;
   status: number;
   statusText: string;
   headers: Headers;

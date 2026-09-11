@@ -16,7 +16,7 @@ export {
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req: Request): void => {
-  if (!req.url.startsWith("/limited/")) return;
+  if (!req.path.startsWith("/limited/")) return;
 
   // register() is idempotent; the rps is fixed at the first call per name.
   RateLimit.register("limited", 10);

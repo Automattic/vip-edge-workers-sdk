@@ -11,7 +11,7 @@
 // Runs in the client-request phase so the redirect fires before the cache
 // lookup — the destination URL is what gets cached on a subsequent request.
 
-import { Request, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+import { Request, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
 export {
   alloc,
@@ -19,23 +19,20 @@ export {
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req: Request): void => {
+  const path = req.path;
+
   // Rule 1: rename /blog and /blog/* → /articles and /articles/*
-  if (req.url == "/blog" || req.url.startsWith("/blog/")) {
-    redirect(req, "/articles" + req.url.slice(5));
+  if (path == "/blog" || path.startsWith("/blog/")) {
+    req.path = "/articles" + path.slice(5);
+    req.respondRedirect(req.url, 301);
     return;
   }
 
   // Rule 2: strip a trailing slash (/foo/ → /foo), leaving the root "/" alone.
-  // Split off any query string first so "/foo/?a=1" → "/foo?a=1".
-  const qPos = req.url.indexOf("?");
-  const path = qPos >= 0 ? req.url.slice(0, qPos) : req.url;
-  const query = qPos >= 0 ? req.url.slice(qPos) : "";
+  // Assigning req.path keeps the query string, so "/foo/?a=1" → "/foo?a=1".
   if (path.length > 1 && path.endsWith("/")) {
-    redirect(req, path.slice(0, path.length - 1) + query);
+    req.path = path.slice(0, path.length - 1);
+    req.respondRedirect(req.url, 301);
     return;
   }
 });
-
-function redirect(req: Request, location: string): void {
-  req.respondText(301, null, new Headers([["location", location]]));
-}

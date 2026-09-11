@@ -16,8 +16,7 @@ export {
 onOriginResponse((resp: Response): void => {
   resp.setCacheControl("max-age=10");
 
-  const path = resp.request.url.split("?")[0];
-  if (path.endsWith(".pdf")) {
+  if (resp.request.path.endsWith(".pdf")) {
     resp.headers.set("x-pdf", "1");
   }
 });
