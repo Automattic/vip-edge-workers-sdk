@@ -1,0 +1,50 @@
+---
+name: Publish to npm (if applicable)
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      npm_tag:
+        description: 'NPM tag for prerelease'
+        default: 'next'
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true && contains( github.event.pull_request.labels.*.name, '[ Type ] NPM version update' ) && startsWith( github.head_ref, 'release/')
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: Automattic/vip-actions/npm-publish@438cd00aac2463a2dbfb4a747ad7b1ac67a2575a # v0.7.5
+        env:
+          NPM_CONFIG_LOGLEVEL: silent
+        with:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm-version: '11'
+          USE_TRUSTED_PUBLISHING: 'true'
+          PROVENANCE: 'true'
+          CONVENTIONAL_COMMITS: 'true'
+
+  publish-prerelease:
+    name: Publish prerelease
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: Automattic/vip-actions/npm-publish-prerelease@438cd00aac2463a2dbfb4a747ad7b1ac67a2575a # v0.7.5
+        with:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          npm-version: '11'
+          USE_TRUSTED_PUBLISHING: 'true'
+          PROVENANCE: 'true'
+          NPM_TAG: ${{ inputs.npm_tag }}
