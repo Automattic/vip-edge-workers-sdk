@@ -14,6 +14,7 @@ examples:
 	cd examples/rewrite && npm install && npm run asbuild
 	cd examples/udger && npm install && npm run asbuild
 	cd examples/html-rewrite && npm install && npm run asbuild
+	cd examples/csp-nonce && npm install && npm run asbuild
 
 clean-examples:
 	rm -rf examples/fetch/build examples/fetch/node_modules
@@ -26,3 +27,4 @@ clean-examples:
 	rm -rf examples/rewrite/build examples/rewrite/node_modules
 	rm -rf examples/udger/build examples/udger/node_modules
 	rm -rf examples/html-rewrite/build examples/html-rewrite/node_modules
+	rm -rf examples/csp-nonce/build examples/csp-nonce/node_modules
