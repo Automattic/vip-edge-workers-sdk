@@ -714,6 +714,7 @@ Working examples under [`examples/`](examples):
 | [`rate-limit`](examples/rate-limit) | Per-path rate limiting with `RateLimit` |
 | [`json`](examples/json) | Parse a JSON API response into a typed `@json` class |
 | [`html-rewrite`](examples/html-rewrite) | Declarative HTML rewriting with `HtmlRules` — anonymize outbound links via href.li |
+| [`csp-nonce`](examples/csp-nonce) | Per-response Content-Security-Policy nonce with `getRandomValues`, stamped onto `<script>` tags via `HtmlRules` |
 | [`redirect`](examples/redirect) | 301 redirects — rename a path prefix and strip trailing slashes |
 | [`rewrite`](examples/rewrite) | Internal rewrite — repoint host + URI before cache lookup, no client-visible redirect |
 | [`headers`](examples/headers) | Override `Cache-Control` on the origin response + tag `.pdf` responses using the `resp.request` view |
