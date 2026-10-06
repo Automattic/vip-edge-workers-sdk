@@ -22,6 +22,8 @@ export {
   getRandomValues,
   hexEncode,
   HtmlRules,
+  RegExp,
+  RegExpMatch,
   URLSearchParams,
   Cookies,
   formDecode,

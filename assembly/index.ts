@@ -26,6 +26,8 @@ export {
 
 export { HtmlRules } from './html';
 
+export { RegExp, RegExpMatch } from './regex';
+
 export { URLSearchParams, Cookies, formDecode, formEncode } from './url';
 
 // Body-buffering markers. Re-export the one(s) matching the phases your worker

@@ -627,6 +627,53 @@ Secrets should come from `getenv()` so they are injected at deploy time instead 
 
 ---
 
+### Regular expressions (`RegExp`)
+
+A JavaScript-shaped `RegExp`. Matching runs on the host, so no regex engine is compiled into your worker. Pattern syntax is that of Rust's [`regex`](https://docs.rs/regex/latest/regex/#syntax) crate, which covers what most JavaScript patterns use: character classes, `\d` `\w` `\s` `\b`, Unicode classes such as `\p{L}`, named groups `(?<name>…)`, non-greedy quantifiers, alternation, anchors and inline flags.
+
+```ts
+import { RegExp, onClientRequest } from "@automattic/vip-edge-workers-sdk";
+
+export { alloc, on_client_request } from "@automattic/vip-edge-workers-sdk/assembly/index";
+
+// Patterns are validated when constructed, so build them at module scope and fail fast.
+const legacyPost = new RegExp("^/(?<year>\\d{4})/(?<month>\\d{2})/(?<slug>[a-z0-9-]+)/?$", "i");
+const trailingSlash = new RegExp("/+$");
+
+onClientRequest((req) => {
+  const m = legacyPost.exec(req.path);
+  if (m !== null) {
+    req.url = "/posts/" + m.group("slug")! + "?y=" + m.group("year")! + "&m=" + m.group("month")!;
+    return;
+  }
+  req.url = trailingSlash.replace(req.path, "") + req.query;
+});
+```
+
+AssemblyScript has no regex literals and cannot extend `String`, so the string methods live on the `RegExp`:
+
+| JavaScript | SDK |
+| --- | --- |
+| `/^\/blog\//i` | `new RegExp("^/blog/", "i")` |
+| `re.exec(s)` / `re.test(s)` | same, including `lastIndex` behaviour with `g` |
+| `s.match(re)` | `re.match(s)` |
+| `s.matchAll(re)` | `re.matchAll(s)` → `RegExpMatch[]` |
+| `s.replace(re, "$1")` | `re.replace(s, "$1")` — first match, or all with `g` |
+| `s.replaceAll(re, "$1")` | `re.replaceAll(s, "$1")` |
+| `s.replace(re, (m) => …)` | `re.replaceWith(s, (m) => …)` |
+| `s.search(re)` | `re.search(s)` |
+| `s.split(re, limit)` | `re.split(s, limit)` |
+| `m[1]`, `m.index`, `m.groups.name` | `m[1]`, `m.index`, `m.group("name")` / `m.groups.get("name")` |
+| `m.indices[1]` (`d` flag) | `m.start(1)` / `m.end(1)`, always available |
+
+Flags: `g`, `i`, `m`, `s` work as in JavaScript. `u` and `d` are accepted as no-ops because matching is always Unicode-aware and indices are always available. `y` and `v` throw. Replacement templates understand `$1`, `$<name>`, `$&` and `$$`; `` $` `` and `$'` are not supported and stay literal, and a `$n` for a group that does not exist expands to the empty string rather than staying literal. Indices (`index`, `start`, `end`, `search`, `lastIndex`) are UTF-16 code-unit positions, exactly as in JavaScript.
+
+**Not supported:** lookahead `(?=…)` / `(?!…)`, lookbehind `(?<=…)` / `(?<!…)`, backreferences `\\1` / `\\k<name>`, atomic groups and possessive quantifiers. Patterns using them throw a `SyntaxError` at construction. A negative lookahead such as "path does not contain `/admin/`" is usually two `test` calls combined in code. `\\d`, `\\w` and `\\b` are Unicode-aware rather than ASCII-only.
+
+The host bounds pattern, subject and replacement sizes; exceeding a bound throws a `RangeError`.
+
+---
+
 ### Parsing JSON
 
 The SDK does not include a JSON library. Workers that need to parse structured JSON bodies add [`json-as`](https://www.npmjs.com/package/json-as) directly to their own `package.json` and pass `--transform json-as` to `asc`. Workers that don't parse JSON pay nothing — no serialization code is included in their binary.
