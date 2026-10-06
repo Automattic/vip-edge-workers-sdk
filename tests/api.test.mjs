@@ -29,8 +29,29 @@ async function compileApiFixture() {
   }
 
   const instance = await WebAssembly.instantiate(module, imports);
-  return { exports: instance.exports, tempRoot };
+  const { memory } = instance.exports;
+  const str = (ptr) => {
+    const len = new Uint32Array(memory.buffer, ptr - 4, 1)[0];
+    return Buffer.from(memory.buffer, ptr, len).toString('utf16le');
+  };
+  return { exports: instance.exports, str, tempRoot };
 }
+
+test('Response.addVary / setVary normalise, merge and refuse what nginx would not cache', async () => {
+  const { exports, str, tempRoot } = await compileApiFixture();
+
+  try {
+    assert.equal(str(exports.varyAddMergesAndDedupes()), 'accept-encoding, x-device-class, x-locale');
+    assert.equal(str(exports.varySetReplacesAllLines()), 'x-locale, x-theme|1');
+    assert.equal(exports.varySetEmptyRemoves(), 1);
+    assert.equal(exports.varyAcceptsExactly128(), 1);
+    assert.throws(() => exports.varyRejectsStar(), /AssemblyScript aborted/);
+    assert.throws(() => exports.varyRejectsInvalidName(), /AssemblyScript aborted/);
+    assert.throws(() => exports.varyRejectsTooLong(), /AssemblyScript aborted/);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
 
 test('standalone Headers enforce host header validation rules', async () => {
   const { exports, tempRoot } = await compileApiFixture();

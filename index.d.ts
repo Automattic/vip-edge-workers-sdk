@@ -86,6 +86,8 @@ export class Response {
   arrayBuffer(): ArrayBuffer | null;
   setBodyText(text: string | null): void;
   setCacheControl(value: string): void;
+  addVary(field: string): void;
+  setVary(fields: string[]): void;
 }
 
 export interface RequestInit {
