@@ -240,8 +240,30 @@ req.respondWith(Response.redirect("/elsewhere"));
 | `setBodyText(text)` | `void` | UTF-8 encode and replace `body` |
 | `isError()` | `bool` | `true` iff `errorKind` is set |
 | `setCacheControl(value)` | `void` | Override the `Cache-Control` header for custom cache behaviour |
+| `addVary(field)` | `void` | Add field(s) to `Vary`, keeping what the origin sent. Lowercases, dedupes, collapses to one line. Throws past 128 bytes or for `*` |
+| `setVary(fields)` | `void` | Replace `Vary` with exactly these fields; `[]` removes it. Same checks as `addVary` |
 
 > **Note:** as with `Request`, the body accessors are **synchronous** and there is no `Response.json()` — parse `text()` with a JSON library (see the [`json`](examples/json) example).
+
+#### `Vary` and the cache
+
+Use `addVary` when a worker makes a response depend on something in the request, so the cache stores one copy per variant instead of serving the wrong one. The host sits behind nginx, and nginx keys its cache on **at most 128 bytes of `Vary`**. Past that, or for `Vary: *`, it does not error, it just quietly stops caching the response. Both methods throw before that can happen, and the host refuses a raw `headers.set("vary", …)` that would cross the line too. To make a response uncacheable on purpose, say so with `setCacheControl("no-store")`.
+
+```ts
+onOriginResponse((resp) => {
+  // The origin already sends Vary: Accept-Encoding; keep it and add ours.
+  resp.addVary("x-device-class");
+});
+```
+
+**Choosing what to vary on:** every distinct value of a varied field is a separate cache entry. Vary on fields with a handful of possible values that you actually branch on. Never vary on anything per-user or per-client; that is a cache with a hit rate of zero and the cost of one.
+
+| Good | Bad |
+| --- | --- |
+| `accept-encoding` — a few values, origin usually sets it already | `user-agent` — one entry per browser build; effectively uncacheable |
+| A normalised header your edge sets, e.g. `x-device-class` with `mobile` / `desktop` | `cookie` — one entry per visitor, so nothing is ever served from cache |
+| `accept-language`, only if the response really changes per language | `authorization` — same, plus you are now caching private responses |
+| | `*` — tells every cache to give up |
 
 #### `resp.request` → `Request` (read-only)
 

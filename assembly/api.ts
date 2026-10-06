@@ -123,6 +123,41 @@ function isHeaderNameChar(code: i32): bool {
     || code == 126;  // ~
 }
 
+// nginx keys its cache on at most 128 bytes of Vary (NGX_HTTP_CACHE_VARY_LEN,
+// all lines joined with ", "). Beyond that, or for `Vary: *`, it silently
+// stops caching the response. The host refuses such writes with code 6; the
+// Vary helpers on Response check first so the error names the real cause.
+const VARY_MAX_BYTES = 128;
+
+function parseVaryFields(raw: string | null, into: string[]): void {
+  if (raw === null) return;
+  const parts = raw.split(",");
+  for (let i = 0; i < parts.length; i++) {
+    const f = asciiLower(parts[i].trim());
+    if (f.length > 0 && !into.includes(f)) into.push(f);
+  }
+}
+
+function joinVaryFields(fields: string[], op: string): string {
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    if (f == "*") {
+      throw new Error(op + ": 'Vary: *' makes the response uncacheable; use setCacheControl(\"no-store\") to say that explicitly");
+    }
+    for (let k = 0; k < f.length; k++) {
+      if (!isHeaderNameChar(f.charCodeAt(k))) {
+        throw new Error(op + ": invalid Vary field name '" + f + "'");
+      }
+    }
+  }
+  const joined = fields.join(", ");
+  const bytes = String.UTF8.byteLength(joined);
+  if (bytes > VARY_MAX_BYTES) {
+    throw new RangeError(op + ": Vary would be " + bytes.toString() + " bytes; nginx caps it at " + VARY_MAX_BYTES.toString() + " and silently stops caching beyond that");
+  }
+  return joined;
+}
+
 function validateLocalHeader(name: string, value: string, op: string): void {
   const nameBytes = String.UTF8.encode(name).byteLength;
   if (nameBytes > 1024) {
@@ -861,6 +896,42 @@ export class Response {
     this.headers.set("x-original-cache-control", value);
   }
 
+  /**
+   * Add one or more fields to `Vary` without dropping what is already there
+   * (typically the origin's `Accept-Encoding`). Accepts a single name or a
+   * comma-separated list. Names are lowercased and deduplicated, and any
+   * existing `Vary` lines are collapsed into one.
+   *
+   * @throws RangeError if the combined `Vary` would exceed 128 bytes, the
+   *   point past which nginx silently stops caching the response.
+   * @throws Error for `*` or an invalid field name.
+   */
+  addVary(field: string): void {
+    const fields: string[] = [];
+    const existing = this.headers.entries();
+    for (let i = 0; i < existing.length; i++) {
+      if (existing[i][0] == "vary") parseVaryFields(existing[i][1], fields);
+    }
+    parseVaryFields(field, fields);
+    if (fields.length == 0) return;
+    this.headers.set("vary", joinVaryFields(fields, "Response.addVary"));
+  }
+
+  /**
+   * Replace `Vary` with exactly these fields (lowercased, deduplicated). An
+   * empty list removes the header. Prefer {@link addVary} unless you mean to
+   * discard what the origin sent.
+   *
+   * @throws RangeError if the `Vary` would exceed 128 bytes (see {@link addVary}).
+   * @throws Error for `*` or an invalid field name.
+   */
+  setVary(fields: string[]): void {
+    const list: string[] = [];
+    for (let i = 0; i < fields.length; i++) parseVaryFields(fields[i], list);
+    if (list.length == 0) { this.headers.delete("vary"); return; }
+    this.headers.set("vary", joinVaryFields(list, "Response.setVary"));
+  }
+
   /** @internal */
   pack(): ArrayBuffer {
     const w = new MsgpackWriter();
@@ -1001,6 +1072,7 @@ function headerSet(name: string, value: string): void {
   if (rc === 2) throw new Error("setHeader: invalid header value for '" + name + "'");
   if (rc === 3) throw new Error("setHeader: header name too large (max 1024 bytes)");
   if (rc === 4) throw new Error("setHeader: header value too large (max 65536 bytes)");
+  if (rc === 6) throw new RangeError("setHeader" + ": Vary would exceed nginx's 128-byte cache limit or be '*', which silently disables caching");
 }
 
 // Shared header-append logic backing Headers.append on a live request/response.
@@ -1012,6 +1084,7 @@ function headerAppend(name: string, value: string): void {
   if (rc === 2) throw new Error("appendHeader: invalid header value for '" + name + "'");
   if (rc === 3) throw new Error("appendHeader: header name too large (max 1024 bytes)");
   if (rc === 4) throw new Error("appendHeader: header value too large (max 65536 bytes)");
+  if (rc === 6) throw new RangeError("appendHeader" + ": Vary would exceed nginx's 128-byte cache limit or be '*', which silently disables caching");
 }
 
 // Append a header on the response builder used by `responseSend`. Appending
@@ -1025,6 +1098,7 @@ function responseHeaderAppend(name: string, value: string): void {
   if (rc === 2) throw new Error("respond: invalid header value for '" + name + "'");
   if (rc === 3) throw new Error("respond: header name too large (max 1024 bytes)");
   if (rc === 4) throw new Error("respond: header value too large (max 65536 bytes)");
+  if (rc === 6) throw new RangeError("respond" + ": Vary would exceed nginx's 128-byte cache limit or be '*', which silently disables caching");
 }
 
 // Commit the response builder. Status + body are last-write-wins across
