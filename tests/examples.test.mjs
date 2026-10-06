@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const asc = resolve(repoRoot, 'node_modules/.bin/asc');
 const exampleNames = [
-  'fetch', 'headers', 'html-rewrite', 'json', 'kv',
+  'csp-nonce', 'fetch', 'headers', 'html-rewrite', 'json', 'kv',
   'rate-limit', 'redirect', 'rewrite', 'udger', 'webhook',
 ];
 
