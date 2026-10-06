@@ -43,6 +43,42 @@ export class Cookies {
 export function formDecode(s: string): string;
 export function formEncode(s: string): string;
 
+export class RegExpMatch {
+  readonly input: string;
+  readonly index: number;
+  readonly length: number;
+  get(i: number): string | null;
+  group(name: string): string | null;
+  readonly groups: Map<string, string | null>;
+  start(i: number): number;
+  end(i: number): number;
+  toString(): string;
+}
+
+export class RegExp {
+  constructor(source: string, flags?: string);
+  readonly source: string;
+  readonly flags: string;
+  readonly global: boolean;
+  readonly ignoreCase: boolean;
+  readonly multiline: boolean;
+  readonly dotAll: boolean;
+  lastIndex: number;
+  readonly groupCount: number;
+  readonly groupNames: (string | null)[];
+  exec(input: string): RegExpMatch | null;
+  test(input: string): boolean;
+  search(input: string): number;
+  match(input: string): (string | null)[] | null;
+  matchAll(input: string): RegExpMatch[];
+  replace(input: string, replacement: string): string;
+  replaceAll(input: string, replacement: string): string;
+  replaceWith(input: string, fn: (m: RegExpMatch) => string): string;
+  split(input: string, limit?: number): string[];
+  toString(): string;
+}
+export function formEncode(s: string): string;
+
 export class Request {
   method: string;
   url: string;
