@@ -92,7 +92,7 @@ test('published package includes its example build surface', () => {
     const { details } = packPackage(tempRoot);
     const paths = new Set(details.files.map(({ path }) => path));
     const examples = [
-      'fetch', 'headers', 'html-rewrite', 'json', 'kv',
+      'csp-nonce', 'fetch', 'headers', 'html-rewrite', 'json', 'kv',
       'rate-limit', 'redirect', 'rewrite', 'udger', 'webhook',
     ];
 
