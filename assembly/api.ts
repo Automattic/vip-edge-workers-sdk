@@ -754,7 +754,8 @@ export class Response {
    * request. Always `null` for proxy responses.
    *
    * Possible values: `timeout`, `too_many_inflight`, `request_too_large`,
-   * `response_too_large`, `body_read`, `transport`, `phase_not_allowed`.
+   * `response_too_large`, `body_read`, `transport`, `bad_request`,
+   * `hops_exhausted`.
    *
    * Check {@link isError} before reading this field.
    */
@@ -1157,10 +1158,6 @@ declare function hostFetch(meta_ptr: i32, meta_len: i32, body_ptr: i32, body_len
  * perspective — the host suspends execution while its async fetch runs.
  * Modelled on WHATWG `fetch(url, init)`, but it returns a {@link Response}
  * directly rather than a `Promise` (AssemblyScript has no async).
- *
- * **Only available in the client-request phase.** Calling it from any other
- * phase returns a {@link Response} with {@link Response.errorKind}
- * set to `"phase_not_allowed"`.
  *
  * Errors are surfaced via fields, not exceptions. Always check
  * {@link Response.isError} before reading the response body.

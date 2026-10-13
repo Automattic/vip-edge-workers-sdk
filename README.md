@@ -44,7 +44,7 @@ The host invokes the worker at up to four points per request:
 
 | Phase | Register with | ABI export | Body marker | When it runs |
 | --- | --- | --- | --- | --- |
-| Client request | `onClientRequest` | `on_client_request` | `client_request_body` | Before cache lookup. Only phase that can call `fetch()`. |
+| Client request | `onClientRequest` | `on_client_request` | `client_request_body` | Before cache lookup. |
 | Origin request | `onOriginRequest` | `on_origin_request` | `origin_request_body` | Cache miss, before forwarding to origin. |
 | Client response | `onClientResponse` | `on_client_response` | `client_response_body` | After cache lookup, before sending to client. |
 | Origin response | `onOriginResponse` | `on_origin_response` | `origin_response_body` | Cache miss, after origin responds. |
@@ -418,8 +418,6 @@ onOriginResponse((resp: Response): void => {
 
 Make an outbound HTTP request from the worker. Modelled on WHATWG [`fetch(url, init)`](https://developer.mozilla.org/en-US/docs/Web/API/fetch), but — because AssemblyScript has no `async` — it returns a `Response` **directly, not a `Promise`**. From your code's perspective it's a regular synchronous call: the host suspends the WASM instance while the request is in flight and resumes it with the response. Errors are surfaced via fields rather than a rejected promise, so always check `resp.isError()` before reading the body.
 
-**Available in the client-request phase only.** Calling it from any other phase returns a `Response` with `errorKind` set to `"phase_not_allowed"`.
-
 ```ts
 import { fetch, Headers, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
@@ -458,7 +456,7 @@ const resp = fetch("https://api.example.com/v1/data", {
 | `headers` | `Headers \| null` | `null` |
 | `body` | `Uint8Array \| null` | `null` |
 
-`errorKind` values: `timeout`, `too_many_inflight`, `request_too_large`, `response_too_large`, `body_read`, `transport`, `phase_not_allowed`.
+`errorKind` values: `timeout`, `too_many_inflight`, `request_too_large`, `response_too_large`, `body_read`, `transport`, `bad_request`, `hops_exhausted`.
 
 Host-enforced limits: 2 s end-to-end timeout · 10 MiB request body · 10 MiB response body · per-worker concurrency cap (FIFO queue).
 
