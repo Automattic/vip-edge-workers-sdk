@@ -33,10 +33,10 @@ export { URLSearchParams, Cookies, formDecode, formEncode } from './url';
 // Body-buffering markers. Re-export the one(s) matching the phases your worker
 // needs body access in. Omitting a marker means the host streams that body
 // without buffering it — req.body / resp.body will be null for that phase.
-export function on_client_request_body(): void {}
-export function on_origin_request_body(): void {}
-export function on_client_response_body(): void {}
-export function on_origin_response_body(): void {}
+export function needs_client_request_body(): void {}
+export function needs_origin_request_body(): void {}
+export function needs_client_response_body(): void {}
+export function needs_origin_response_body(): void {}
 
 // --- WASM ABI exports ---
 

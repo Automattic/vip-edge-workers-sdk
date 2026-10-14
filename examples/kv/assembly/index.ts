@@ -11,7 +11,7 @@ import { Request, onClientRequest, KV } from "@automattic/vip-edge-workers-sdk";
 export {
   alloc,
   on_client_request,
-  on_client_request_body,
+  needs_client_request_body,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req: Request): void => {
