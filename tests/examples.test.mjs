@@ -53,8 +53,8 @@ test('KV example exports the marker required to read the request body', () => {
   const exports = WebAssembly.Module.exports(module).map(({ name }) => name);
 
   assert.ok(
-    exports.includes('client_request_body'),
-    'PUT /note reads req.text(), so the worker must export client_request_body',
+    exports.includes('on_client_request_body'),
+    'PUT /note reads req.text(), so the worker must export on_client_request_body',
   );
 });
 

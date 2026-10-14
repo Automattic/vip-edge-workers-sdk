@@ -16,7 +16,7 @@ import {
 export {
   alloc,
   on_client_request,
-  client_request_body,    // buffer the request body so it's available for HMAC computation
+  on_client_request_body,    // buffer the request body so it's available for HMAC computation
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req: Request): void => {

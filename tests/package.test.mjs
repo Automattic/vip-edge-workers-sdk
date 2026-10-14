@@ -47,7 +47,7 @@ test('published types compile in a fresh TypeScript consumer', () => {
       import { fetch, Headers, KV, RateLimit, Request, Response } from '@automattic/vip-edge-workers-sdk';
       export {
         alloc,
-        client_request_body,
+        on_client_request_body,
         on_client_request,
       } from '@automattic/vip-edge-workers-sdk/assembly/index';
 

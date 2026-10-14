@@ -26,7 +26,7 @@ export function on_origin_response(
   body_len: number,
 ): bigint;
 
-export function client_request_body(): void;
-export function origin_request_body(): void;
-export function client_response_body(): void;
-export function origin_response_body(): void;
+export function on_client_request_body(): void;
+export function on_origin_request_body(): void;
+export function on_client_response_body(): void;
+export function on_origin_response_body(): void;

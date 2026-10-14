@@ -44,10 +44,10 @@ The host invokes the worker at up to four points per request:
 
 | Phase | Register with | ABI export | Body marker | When it runs |
 | --- | --- | --- | --- | --- |
-| Client request | `onClientRequest` | `on_client_request` | `client_request_body` | Before cache lookup. |
-| Origin request | `onOriginRequest` | `on_origin_request` | `origin_request_body` | Cache miss, before forwarding to origin. |
-| Client response | `onClientResponse` | `on_client_response` | `client_response_body` | After cache lookup, before sending to client. |
-| Origin response | `onOriginResponse` | `on_origin_response` | `origin_response_body` | Cache miss, after origin responds. |
+| Client request | `onClientRequest` | `on_client_request` | `on_client_request_body` | Before cache lookup. |
+| Origin request | `onOriginRequest` | `on_origin_request` | `on_origin_request_body` | Cache miss, before forwarding to origin. |
+| Client response | `onClientResponse` | `on_client_response` | `on_client_response_body` | After cache lookup, before sending to client. |
+| Origin response | `onOriginResponse` | `on_origin_response` | `on_origin_response_body` | Cache miss, after origin responds. |
 
 Only re-export the ABI symbols for phases your worker handles. `alloc` is always required. Re-export a body marker only when that phase needs the body buffered (see [Body access](#body-access)).
 
@@ -96,7 +96,7 @@ import { onClientRequest } from "@automattic/vip-edge-workers-sdk";
 export {
   alloc,
   on_client_request,
-  client_request_body,          // ← tells the host to buffer the request body
+  on_client_request_body,       // ← tells the host to buffer the request body
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req) => {
@@ -106,10 +106,10 @@ onClientRequest((req) => {
 
 | Phase | Marker |
 | --- | --- |
-| Client request | `client_request_body` |
-| Origin request | `origin_request_body` |
-| Client response | `client_response_body` |
-| Origin response | `origin_response_body` |
+| Client request | `on_client_request_body` |
+| Origin request | `on_origin_request_body` |
+| Client response | `on_client_response_body` |
+| Origin response | `on_origin_response_body` |
 
 The marker is a compile-time signal — its presence in the binary is what matters, not any runtime call. Workers that omit a marker pay no buffering cost for that phase.
 
@@ -475,7 +475,7 @@ Keys: max 64 bytes (UTF-8). Values: max 10 KiB. Entries are subject to site-wide
 ```ts
 import { KV, onClientRequest } from "@automattic/vip-edge-workers-sdk";
 
-// PUT reads req.text() — export client_request_body to have the host buffer it.
+// PUT reads req.text() — export on_client_request_body to have the host buffer it.
 onClientRequest((req) => {
   if (req.method == "PUT" && req.url == "/note") {
     KV.setText("note", req.text() || "");
@@ -584,7 +584,7 @@ import {
 } from "@automattic/vip-edge-workers-sdk";
 
 export {
-  alloc, on_client_request, client_request_body,
+  alloc, on_client_request, on_client_request_body,
 } from "@automattic/vip-edge-workers-sdk/assembly/index";
 
 onClientRequest((req) => {
