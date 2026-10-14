@@ -620,13 +620,15 @@ onClientRequest((req) => {
 
 | Function | Signature | Notes |
 | --- | --- | --- |
-| `hmacSha256` | `(key: Uint8Array, msg: Uint8Array) → Uint8Array` | 32-byte HMAC-SHA256 digest |
+| `hmacSha256` | `(key: Uint8Array, msg: Uint8Array) → Uint8Array` | 32-byte HMAC-SHA256 digest; throws `RangeError` if an input exceeds the host's size limit |
 | `hmacSha256Str` | `(key: string, msg: string) → Uint8Array` | Convenience: UTF-8 encodes both inputs |
-| `sha256` | `(msg: Uint8Array) → Uint8Array` | 32-byte SHA-256 digest |
-| `secureCompare` | `(a: Uint8Array, b: Uint8Array) → bool` | Timing-attack-safe comparison; execution time depends only on input length, not content |
-| `jwtVerifyHs256` | `(token: string, secret: string) → string \| null` | Verifies alg, signature, and `exp`; returns claims JSON or `null` |
-| `getRandomValues` | `(array: Uint8Array) → Uint8Array` | Fills `array` with OS-sourced secure random bytes; at most 64 KiB per call |
+| `sha256` | `(msg: Uint8Array) → Uint8Array` | 32-byte SHA-256 digest; throws `RangeError` past the host's size limit |
+| `secureCompare` | `(a: Uint8Array, b: Uint8Array) → bool` | Timing-attack-safe comparison; execution time depends only on input length, not content. Throws `RangeError` past the host's size limit rather than returning `false` |
+| `jwtVerifyHs256` | `(token: string, secret: string) → string \| null` | Verifies alg, signature, and `exp`; returns claims JSON or `null`. Throws `RangeError` only if token or secret exceeds the host's size limit |
+| `getRandomValues` | `(array: Uint8Array) → Uint8Array` | Fills `array` with OS-sourced secure random bytes; throws `RangeError` past the host's per-call limit |
 | `hexEncode` | `(bytes: Uint8Array) → string` | Lowercase hex string (two characters per byte) |
+
+Input sizes for all of these are bounded by the host, and every function reports an oversize input the same way: a `RangeError` naming the call. The limits in effect are part of the platform documentation, not the SDK.
 
 **Secure random bytes**
 
@@ -639,7 +641,7 @@ onClientRequest((req) => {
 });
 ```
 
-`getRandomValues` mirrors Web Crypto: it fills the array in place from the host's OS entropy source and throws if asked for more than 64 KiB at once. `Math.random()` also works in workers, but it is an ordinary PRNG whose output can be predicted from a few observed values, so never use it for tokens, nonces, session IDs, or keys.
+`getRandomValues` mirrors Web Crypto: it fills the array in place from the host's OS entropy source and throws a `RangeError` if asked for more than the host's per-call limit allows. `Math.random()` also works in workers, but it is an ordinary PRNG whose output can be predicted from a few observed values, so never use it for tokens, nonces, session IDs, or keys.
 
 `jwtVerifyHs256` validates `alg: "HS256"` strictly — RS256 / ES256 tokens return `null`. `exp` is checked against wall clock; `nbf` and `iat` are not enforced.
 
